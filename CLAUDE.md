@@ -6,25 +6,50 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 GPU-Integrated AI-Enhanced Scribble Plotter v3.0 - A Google Colab-based system that converts PLT vector graphics into artistic "scribble" renderings using GPU-accelerated AI and Hopfield neural networks. Inspired by Kent Benson's 1983-1986 Hopfield Network research.
 
-## Running the Project
+## Running Locally
 
-This is a Google Colab notebook project. No traditional build system exists.
+**Setup:**
+```bash
+# Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+**Commands:**
+```bash
+# Quick system test
+./venv/bin/python scribble_plotter_local.py --test
+
+# GPU status check
+./venv/bin/python scribble_plotter_local.py --gpu-status
+
+# Hopfield network demo
+./venv/bin/python scribble_plotter_local.py --demo
+
+# Process PLT files (default: 3 variations each)
+./venv/bin/python scribble_plotter_local.py --input /path/to/plt/files
+
+# Process with custom settings
+./venv/bin/python scribble_plotter_local.py --input ./files --examples 5 --output ./results
+
+# Disable features
+./venv/bin/python scribble_plotter_local.py --no-gpu --no-ai --no-hopfield
+```
+
+**Input/Output:**
+- Place `.plt` files in `ScribblePlotter_Output/input/`
+- Output saved to `ScribblePlotter_Output/output/` (PNG, PDF, DXF)
+
+## Running in Google Colab
 
 **Setup:**
 1. Open `COMPLETE_GPU_INTEGRATED_AI_ENHANCED_SCRIBBLE_PLOTTER.ipynb` in Google Colab
 2. Enable GPU: Runtime → Change Runtime Type → GPU
 3. Run cells in order (first cell auto-installs dependencies)
 4. Call `INTERFACE.display_interface()` for the interactive UI
-
-**Quick Commands:**
-- `quick_test()` - System health check
-- `gpu_status()` - GPU availability and memory info
-- `hopfield_demo()` - Neural network demonstration
-
-**Dependencies (auto-installed):**
-```
-pip install matplotlib numpy pandas regex ipywidgets ezdxf reportlab tqdm scikit-learn torch torchvision cupy-cuda11x
-```
 
 ## Architecture
 
