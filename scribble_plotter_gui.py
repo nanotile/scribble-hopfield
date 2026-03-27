@@ -92,6 +92,11 @@ class ProcessingWorker(QThread):
 
                     self.log.emit(f"  {'Success' if success else 'Failed'}")
 
+            # Organize output files into GROUP directories
+            self.processing_system.directory_manager.organize_output_files()
+            if config.get('organize_groups', True):
+                self.log.emit("Output files organized into GROUP directories")
+
             summary = {
                 'success': True,
                 'total_operations': total_operations,
@@ -341,6 +346,13 @@ class ScribblePlotterGUI(QMainWindow):
         self.dxf_checkbox.setChecked(self.config.get('generate_dxf', True))
         self.dxf_checkbox.stateChanged.connect(lambda state: self.config.set('generate_dxf', state == Qt.CheckState.Checked.value))
         layout.addWidget(self.dxf_checkbox)
+
+        # GROUP organization checkbox
+        self.groups_checkbox = QCheckBox("Organize GROUP directories")
+        self.groups_checkbox.setChecked(self.config.get('organize_groups', True))
+        self.groups_checkbox.stateChanged.connect(lambda state: self.config.set('organize_groups', state == Qt.CheckState.Checked.value))
+        self.groups_checkbox.setToolTip("Copy output files into GROUP_PDF, GROUP_DXF, GROUP_PNG directories")
+        layout.addWidget(self.groups_checkbox)
 
         group.setLayout(layout)
         return group
