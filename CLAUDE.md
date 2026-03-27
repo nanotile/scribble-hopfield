@@ -37,11 +37,21 @@ pip install -r requirements.txt
 
 # Disable features
 ./venv/bin/python scribble_plotter_local.py --no-gpu --no-ai --no-hopfield
+
+# End-to-end demo (creates samples, processes, shows output)
+./venv/bin/python scribble_plotter_local.py --full-demo
+
+# Create sample PLT files for testing
+./venv/bin/python scribble_plotter_local.py --create-samples
+
+# Disable GROUP directory organization
+./venv/bin/python scribble_plotter_local.py --input ./files --no-groups
 ```
 
 **Input/Output:**
 - Place `.plt` files in `ScribblePlotter_Output/input/`
 - Output saved to `ScribblePlotter_Output/output/` (PNG, PDF, DXF)
+- GROUP directories aggregate outputs: `GROUP_PDF/`, `GROUP_DXF/`, `GROUP_PNG/`
 
 ## Running in Google Colab
 
@@ -53,7 +63,7 @@ pip install -r requirements.txt
 
 ## Architecture
 
-The system consists of 7 main classes organized in a processing pipeline:
+The system consists of 8 main classes organized in a processing pipeline:
 
 ### Core Classes
 
@@ -64,6 +74,7 @@ The system consists of 7 main classes organized in a processing pipeline:
 | `GPUAcceleratedAI` | Feature extraction (15-feature vectors), parameter prediction with GPU/CPU fallback |
 | `GPUHopfieldNetwork` | Stores artistic patterns (200 capacity), Hebbian learning, spurious memory detection |
 | `ScribbleRenderer` | Converts coordinates to scribble artwork via matplotlib |
+| `DirectoryManager` | Per-file working directories, GROUP aggregate directories (copy-based, non-destructive) |
 | `CompleteProcessingSystem` | Batch orchestration, multi-format output (PNG/PDF/DXF) |
 | `CompleteInterface` | IPyWidgets-based interactive UI |
 
@@ -84,8 +95,11 @@ PLT Files → PLTProcessor → GPUAcceleratedAI (feature extraction)
 ## File Structure
 
 ```
-├── COMPLETE_GPU_INTEGRATED_AI_ENHANCED_SCRIBBLE_PLOTTER.ipynb  # Main notebook
-└── complete_gpu_integrated_ai_enhanced_scribble_plotter.py     # Python module version
+├── COMPLETE_GPU_INTEGRATED_AI_ENHANCED_SCRIBBLE_PLOTTER.ipynb  # Main Colab notebook
+├── complete_gpu_integrated_ai_enhanced_scribble_plotter.py     # Colab Python module
+├── scribble_plotter_local.py                                   # Local CLI runner
+├── scribble_plotter_gui.py                                     # PyQt6 GUI
+└── requirements.txt                                            # Python dependencies
 ```
 
 Google Drive directories created at runtime:
@@ -103,4 +117,5 @@ Settings are persisted in JSON and accessible via `CONFIG.get()`/`CONFIG.set()`:
 - `gpu_enabled` - GPU acceleration toggle
 - `total_examples` - Variations per input file (default: 3)
 - `generate_pdf`/`generate_dxf`/`generate_png` - Output format toggles
+- `organize_groups` - Copy outputs into GROUP aggregate directories (default: true)
 - `scale_factor_x`/`scale_factor_y` - PLT coordinate scaling (default: 0.09)
