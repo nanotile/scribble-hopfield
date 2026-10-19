@@ -5,26 +5,22 @@ Adapted from Google Colab notebook for local execution
 """
 
 import os
-import sys
 import json
 import re
 import random
 import math
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from pathlib import Path
-from typing import List, Tuple, Dict, Optional
-from tqdm import tqdm
-from datetime import datetime
 import shutil
 import warnings
 import argparse
 
-warnings.filterwarnings('ignore')
-
-# GPU imports
+import numpy as np
+import matplotlib.pyplot as plt
 import torch
+from pathlib import Path
+from tqdm import tqdm
+from datetime import datetime
+
+warnings.filterwarnings('ignore')
 
 print("GPU-Integrated AI-Enhanced Scribble Plotter (Local Version)")
 print("Honoring Kent Benson's 1983-1986 Hopfield Network Research")
@@ -58,7 +54,7 @@ def setup_complete_system(base_dir: str = None):
 
         import time
         start = time.time()
-        c = torch.mm(a, b)
+        _ = torch.mm(a, b)
         torch.cuda.synchronize()
         gpu_time = time.time() - start
 
@@ -202,7 +198,11 @@ class PLTProcessor:
             with open(file_path, 'r') as f:
                 content = f.read()
 
-            if 'PW0' in content[:200]:
+            # Detect format from first non-whitespace character
+            stripped = content.lstrip()
+            if stripped and (stripped[0].isdigit() or stripped[0] == '-'):
+                return self.process_raw_coordinates(content)
+            elif 'PW0' in content[:200]:
                 return self.process_acme_convert(content)
             else:
                 return self.process_acme_trace(content)
@@ -210,6 +210,22 @@ class PLTProcessor:
         except Exception as e:
             print(f"PLT processing error: {e}")
             return []
+
+    def process_raw_coordinates(self, content):
+        """Parse pre-processed x,y,z; coordinate triplets."""
+        coordinates = []
+        content = content.replace('\n', '').replace('\r', '')
+        for token in content.split(';'):
+            token = token.strip()
+            if not token:
+                continue
+            parts = token.split(',')
+            if len(parts) >= 3:
+                try:
+                    coordinates.append((float(parts[0]), float(parts[1]), float(parts[2])))
+                except ValueError:
+                    continue
+        return coordinates
 
     def process_acme_convert(self, content):
         content = content.replace('\n', '').replace('\r', '')
@@ -756,7 +772,7 @@ class CompleteProcessingSystem:
 
             raw_coords = self.plt_processor.process_plt_file(str(plt_file))
             if not raw_coords:
-                print(f"  Failed to process PLT file")
+                print("  Failed to process PLT file")
                 return False
 
             points = self.plt_processor.scale_points(raw_coords)
@@ -800,7 +816,7 @@ class CompleteProcessingSystem:
 
             figure = self.renderer.render_artwork(points, params)
             if not figure:
-                print(f"  Failed to render artwork")
+                print("  Failed to render artwork")
                 return False
 
             method_suffix = params.get('generation_method', 'ai')
@@ -854,7 +870,7 @@ class CompleteProcessingSystem:
                 print(f"  Generated {success_count} format(s) successfully")
                 return True
             else:
-                print(f"  Failed to save any formats")
+                print("  Failed to save any formats")
                 return False
 
         except Exception as e:
@@ -1023,7 +1039,7 @@ def show_directory_structure(base_path, max_depth=3):
         print(f"Directory not found: {base_path}")
         return
 
-    print(f"\nDIRECTORY STRUCTURE")
+    print("\nDIRECTORY STRUCTURE")
     print("=" * 30)
     print(f"{base.name}/")
 
@@ -1264,14 +1280,14 @@ def main():
 
     if not plt_files:
         print(f"\nNo PLT files found in: {input_dir}")
-        print(f"Place your .plt files in the input directory and run again.")
-        print(f"\nAvailable commands:")
-        print(f"  --test            Run system test")
-        print(f"  --demo            Run Hopfield demo")
-        print(f"  --full-demo       Run complete end-to-end demo")
-        print(f"  --create-samples  Create sample PLT files")
-        print(f"  --gpu-status      Show GPU status")
-        print(f"  --help            Show all options")
+        print("Place your .plt files in the input directory and run again.")
+        print("\nAvailable commands:")
+        print("  --test            Run system test")
+        print("  --demo            Run Hopfield demo")
+        print("  --full-demo       Run complete end-to-end demo")
+        print("  --create-samples  Create sample PLT files")
+        print("  --gpu-status      Show GPU status")
+        print("  --help            Show all options")
         return
 
     # Process batch
