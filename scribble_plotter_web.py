@@ -18,6 +18,7 @@ import os
 import io
 import shutil
 import socket
+import tempfile
 import zipfile
 import contextlib
 import time
@@ -114,7 +115,7 @@ def process_uploaded_files(
     sequence_file,
     steps_override: int,
 ):
-    """Process uploaded PLT files and return gallery images + zip + log."""
+    """Process uploaded PLT/DXF/DWG/DWX files and return gallery images + zip + log."""
     if not files:
         return [], None, "No files uploaded."
 
@@ -135,7 +136,7 @@ def process_uploaded_files(
         plt_paths.append(dst)
 
     if not plt_paths:
-        return [], None, "No valid PLT files found in upload."
+        return [], None, "No valid input files found (PLT/DXF/DWG/DWX)."
 
     # Save original config values, then override for this session
     orig_output = CONFIG.config['directories']['output']
@@ -218,31 +219,45 @@ def process_uploaded_files(
     # Collect gallery images (all PNGs in session output)
     gallery_images = sorted(session_output.rglob("*.png"))
     gallery_paths = [str(p) for p in gallery_images]
-    pdf_count = len(list(session_output.rglob("*.pdf")))
-    dxf_count = len(list(session_output.rglob("*.dxf")))
-    svg_count = len(list(session_output.rglob("*.svg")))
 
-    # Build zip of all outputs
+    # Collect all output files by type
+    png_files = sorted(session_output.rglob("*.png"))
+    pdf_files = sorted(session_output.rglob("*.pdf"))
+    dxf_files = sorted(session_output.rglob("*.dxf"))
+    svg_files = sorted(session_output.rglob("*.svg"))
+    all_output_files = png_files + pdf_files + dxf_files + svg_files
+
+    # Build zip in Gradio's temp directory so it can serve the file
     zip_path = None
-    all_outputs = list(session_output.rglob("*"))
-    output_files = [p for p in all_outputs if p.is_file()]
-    if output_files:
-        zip_file = session_dir / "scribble_output.zip"
-        with zipfile.ZipFile(str(zip_file), 'w', zipfile.ZIP_DEFLATED) as zf:
-            for fp in output_files:
+    if all_output_files:
+        tmp_zip = tempfile.NamedTemporaryFile(
+            suffix='.zip', prefix='scribble_output_', delete=False)
+        tmp_zip.close()
+        with zipfile.ZipFile(tmp_zip.name, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for fp in all_output_files:
                 arcname = fp.relative_to(session_output)
                 zf.write(str(fp), str(arcname))
-        zip_path = str(zip_file)
+        zip_path = tmp_zip.name
 
-    # Build concise summary instead of raw log dump
+    # Build concise summary
     summary_lines = [
         f"Processed {len(plt_paths)} file(s) x {examples} variation(s)  "
         f"({successful}/{total_ops} succeeded, {elapsed:.1f}s)",
-        f"Output: {len(gallery_paths)} PNG, {pdf_count} PDF, {dxf_count} DXF, {svg_count} SVG",
+        f"Output: {len(png_files)} PNG, {len(pdf_files)} PDF, "
+        f"{len(dxf_files)} DXF, {len(svg_files)} SVG",
     ]
+
+    if all_output_files:
+        summary_lines.append("")
+        summary_lines.append("Generated files:")
+        for fp in all_output_files:
+            rel = fp.relative_to(session_output)
+            size_kb = fp.stat().st_size / 1024
+            summary_lines.append(f"  {rel}  ({size_kb:.0f} KB)")
+
     if PROCESSING_SYSTEM.error_files:
         summary_lines.append(
-            f"Errors: {len(PROCESSING_SYSTEM.error_files)} file(s) failed"
+            f"\nErrors: {len(PROCESSING_SYSTEM.error_files)} file(s) failed"
         )
     if errors:
         summary_lines.append(f"Exception: {errors[0]}")
@@ -301,13 +316,14 @@ def build_ui() -> gr.Blocks:
             "*Honoring Kent Benson's 1983-1986 Hopfield Network Research*"
         )
 
-        with gr.Tab("Process PLT Files"):
+        with gr.Tab("Process CAD Files"):
             with gr.Row():
                 with gr.Column(scale=1):
                     file_input = gr.File(
-                        label="Upload PLT Files",
+                        label="Upload PLT / DXF / DWG / DWX Files",
                         file_count="multiple",
-                        file_types=[".plt", ".PLT"],
+                        file_types=[".plt", ".PLT", ".dxf", ".DXF",
+                                    ".dwg", ".DWG", ".dwx", ".DWX"],
                         type="filepath",
                     )
                     with gr.Accordion("Settings", open=True):
@@ -338,15 +354,17 @@ def build_ui() -> gr.Blocks:
 
                 with gr.Column(scale=2):
                     gallery = gr.Gallery(
-                        label="Generated Artwork",
+                        label="Generated Artwork (PNG previews)",
                         columns=3,
                         height="auto",
                     )
-                    zip_download = gr.File(label="Download All Outputs (ZIP)")
+                    zip_download = gr.File(
+                        label="Download All Outputs (ZIP — PNG, PDF, DXF, SVG)",
+                    )
                     log_box = gr.Textbox(
-                        label="Processing Log",
-                        lines=12,
-                        max_lines=30,
+                        label="Processing Log & Output Files",
+                        lines=16,
+                        max_lines=50,
                         interactive=False,
                     )
 

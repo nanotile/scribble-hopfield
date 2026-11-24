@@ -358,14 +358,40 @@ class CADFileProcessor:
         except Exception as e:
             print(f"  CAD file error ({ext}): {e}")
             if ext == '.dwg':
-                print("  Note: DWG requires ODA File Converter for newer formats.")
-                print("  Install from https://www.opendesign.com/guestfiles/oda_file_converter")
+                print("  Note: DWG conversion requires dwg2dxf (libredwg).")
+                print("  Install: git clone https://github.com/LibreDWG/libredwg && cd libredwg && mkdir build && cd build && cmake .. && make dwg2dxf")
             return []
 
         return self._extract_coordinates(doc)
 
     def _read_dwg(self, file_path):
         import ezdxf
+        import subprocess
+
+        dwg2dxf_bin = shutil.which('dwg2dxf')
+        if not dwg2dxf_bin:
+            local_bin = Path.home() / '.local' / 'bin' / 'dwg2dxf'
+            if local_bin.exists():
+                dwg2dxf_bin = str(local_bin)
+
+        if dwg2dxf_bin:
+            tmp_path = Path(file_path).with_suffix('.___tmp_dxf___')
+            env = os.environ.copy()
+            lib_dir = str(Path.home() / '.local' / 'lib')
+            env['LD_LIBRARY_PATH'] = lib_dir + ':' + env.get('LD_LIBRARY_PATH', '')
+            try:
+                result = subprocess.run(
+                    [dwg2dxf_bin, '-o', str(tmp_path), str(file_path)],
+                    capture_output=True, text=True, timeout=60, env=env)
+                if tmp_path.exists():
+                    doc = ezdxf.readfile(str(tmp_path))
+                    tmp_path.unlink(missing_ok=True)
+                    return doc
+                print(f"  dwg2dxf conversion failed: {result.stderr.strip()}")
+            except Exception as e:
+                print(f"  dwg2dxf error: {e}")
+                tmp_path.unlink(missing_ok=True)
+
         try:
             from ezdxf.addons import odafc
             tmp_path = Path(file_path).with_suffix('.___tmp_dxf___')
@@ -373,10 +399,10 @@ class CADFileProcessor:
             doc = ezdxf.readfile(str(tmp_path))
             tmp_path.unlink(missing_ok=True)
             return doc
-        except ImportError:
-            return ezdxf.readfile(file_path)
-        except Exception:
-            return ezdxf.readfile(file_path)
+        except (ImportError, Exception):
+            pass
+
+        raise RuntimeError("No DWG converter found (dwg2dxf or ODA File Converter)")
 
     def _extract_coordinates(self, doc):
         coordinates = []

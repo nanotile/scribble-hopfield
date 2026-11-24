@@ -48,11 +48,11 @@ class ProcessingWorker(QThread):
     def run(self):
         try:
             config = self.processing_system.config
-            plt_files = self.processing_system.get_plt_files(self.input_dir)
+            plt_files = self.processing_system.get_input_files(self.input_dir)
 
             if not plt_files:
-                self.log.emit("No PLT files found in input directory")
-                self.finished.emit({'success': False, 'message': 'No PLT files found'})
+                self.log.emit("No input files found (PLT/DXF/DWG/DWX)")
+                self.finished.emit({'success': False, 'message': 'No input files found'})
                 return
 
             total_examples = config.get('total_examples', 3)
@@ -529,9 +529,13 @@ class ScribblePlotterGUI(QMainWindow):
             self.input_dir_edit.setText(directory)
             self.log(f"Input directory set to: {directory}")
 
-            # Count PLT files
-            plt_files = list(Path(directory).glob("*.plt")) + list(Path(directory).glob("*.PLT"))
-            self.log(f"Found {len(plt_files)} PLT files")
+            exts = ['plt', 'dxf', 'dwg', 'dwx']
+            input_files = []
+            for ext in exts:
+                input_files.extend(Path(directory).glob(f"*.{ext}"))
+                input_files.extend(Path(directory).glob(f"*.{ext.upper()}"))
+            input_files = sorted(set(input_files))
+            self.log(f"Found {len(input_files)} input files (PLT/DXF/DWG/DWX)")
 
     def open_output_dir(self):
         """Open the output directory in file manager"""
@@ -591,19 +595,27 @@ class ScribblePlotterGUI(QMainWindow):
         else:
             self.config.config.pop('steps_override', None)
 
-    def test_single_file(self):
-        """Process a single PLT file"""
-        plt_files = list(Path(self.input_dir).glob("*.plt")) + list(Path(self.input_dir).glob("*.PLT"))
+    def _get_input_files(self):
+        exts = ['plt', 'dxf', 'dwg', 'dwx']
+        found = []
+        for ext in exts:
+            found.extend(Path(self.input_dir).glob(f"*.{ext}"))
+            found.extend(Path(self.input_dir).glob(f"*.{ext.upper()}"))
+        return sorted(set(found))
 
-        if not plt_files:
-            QMessageBox.warning(self, "No Files", "No PLT files found in the input directory.")
+    def test_single_file(self):
+        """Process a single input file"""
+        input_files = self._get_input_files()
+
+        if not input_files:
+            QMessageBox.warning(self, "No Files", "No input files found (PLT/DXF/DWG/DWX).")
             return
 
         self._apply_sequence_settings()
         self.set_processing_state(True)
         self.log("Starting single file test...")
 
-        self.single_file_worker = SingleFileWorker(self.processing_system, plt_files[0])
+        self.single_file_worker = SingleFileWorker(self.processing_system, input_files[0])
         self.single_file_worker.log.connect(self.log)
         self.single_file_worker.image_ready.connect(self.update_preview)
         self.single_file_worker.finished.connect(self.on_single_file_finished)
@@ -618,15 +630,15 @@ class ScribblePlotterGUI(QMainWindow):
             self.statusbar.showMessage("Single file processing failed")
 
     def process_all_files(self):
-        """Process all PLT files in the input directory"""
-        plt_files = list(Path(self.input_dir).glob("*.plt")) + list(Path(self.input_dir).glob("*.PLT"))
+        """Process all input files in the directory"""
+        input_files = self._get_input_files()
 
-        if not plt_files:
-            QMessageBox.warning(self, "No Files", "No PLT files found in the input directory.")
+        if not input_files:
+            QMessageBox.warning(self, "No Files", "No input files found (PLT/DXF/DWG/DWX).")
             return
 
         total_examples = self.config.get('total_examples', 3)
-        total_operations = len(plt_files) * total_examples
+        total_operations = len(input_files) * total_examples
 
         self._apply_sequence_settings()
         self.set_processing_state(True)
@@ -635,7 +647,7 @@ class ScribblePlotterGUI(QMainWindow):
         self.progress_bar.show()
         self.cancel_btn.show()
 
-        self.log(f"Starting batch processing: {len(plt_files)} files x {total_examples} examples")
+        self.log(f"Starting batch processing: {len(input_files)} files x {total_examples} examples")
 
         self.processing_worker = ProcessingWorker(self.processing_system, self.input_dir)
         self.processing_worker.progress.connect(self.update_progress)
