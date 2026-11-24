@@ -127,7 +127,7 @@ def setup_complete_system(base_dir=None):
         if gpu_available:
             device_str = 'cuda'
             print(f"GPU Type: {torch.cuda.get_device_name(0)}")
-            print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_mem // 1024**3} GB")
+            print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory // 1024**3} GB")
         else:
             print("Running on CPU (no GPU detected)")
     else:
@@ -1247,6 +1247,10 @@ class CompleteProcessingSystem:
                     print("  Warning: sequence truncated — drawing has fewer"
                           " encodable positions than the sequence length."
                           " Increase --steps to fit more.")
+                elif encoding_info['embedded_count'] < encoding_info['capacity']:
+                    print("  Note: sequence shorter than capacity — remaining"
+                          f" {encoding_info['capacity'] - encoding_info['embedded_count']}"
+                          " positions use random wobble.")
 
             if not strokes:
                 print("  No drawable strokes found")
@@ -1451,9 +1455,9 @@ def gpu_status():
     if torch.cuda.is_available():
         print("\nGPU STATUS: AVAILABLE")
         print(f"   Device: {torch.cuda.get_device_name(0)}")
-        print(f"   Memory: {torch.cuda.get_device_properties(0).total_mem // 1024**3} GB")
+        print(f"   Memory: {torch.cuda.get_device_properties(0).total_memory // 1024**3} GB")
         allocated = torch.cuda.memory_allocated() / 1024**3
-        total = torch.cuda.get_device_properties(0).total_mem / 1024**3
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
         print(f"   Used: {allocated:.2f} GB ({allocated / total * 100:.1f}%)")
     else:
         print("\nGPU STATUS: NOT AVAILABLE")
