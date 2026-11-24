@@ -335,6 +335,159 @@ class PLTProcessor:
 
 
 # ---------------------------------------------------------------------------
+# CAD File Processor — reads DXF, DWG, DWX via ezdxf
+# ---------------------------------------------------------------------------
+
+class CADFileProcessor:
+    SUPPORTED_EXTENSIONS = frozenset({'.dxf', '.dwg', '.dwx'})
+
+    def __init__(self, config):
+        self.config = config
+
+    def process_cad_file(self, file_path):
+        import ezdxf
+
+        path = Path(file_path)
+        ext = path.suffix.lower()
+
+        try:
+            if ext == '.dwg':
+                doc = self._read_dwg(file_path)
+            else:
+                doc = ezdxf.readfile(file_path)
+        except Exception as e:
+            print(f"  CAD file error ({ext}): {e}")
+            if ext == '.dwg':
+                print("  Note: DWG requires ODA File Converter for newer formats.")
+                print("  Install from https://www.opendesign.com/guestfiles/oda_file_converter")
+            return []
+
+        return self._extract_coordinates(doc)
+
+    def _read_dwg(self, file_path):
+        import ezdxf
+        try:
+            from ezdxf.addons import odafc
+            tmp_path = Path(file_path).with_suffix('.___tmp_dxf___')
+            odafc.convert(file_path, str(tmp_path))
+            doc = ezdxf.readfile(str(tmp_path))
+            tmp_path.unlink(missing_ok=True)
+            return doc
+        except ImportError:
+            return ezdxf.readfile(file_path)
+        except Exception:
+            return ezdxf.readfile(file_path)
+
+    def _extract_coordinates(self, doc):
+        coordinates = []
+        msp = doc.modelspace()
+
+        for entity in msp:
+            pts = self._entity_to_coords(entity)
+            if not pts or len(pts) < 1:
+                continue
+            x0, y0 = pts[0]
+            coordinates.append((x0, y0, 10.0))
+            for x, y in pts:
+                coordinates.append((x, y, 0.0))
+            xn, yn = pts[-1]
+            coordinates.append((xn, yn, 10.0))
+
+        return coordinates
+
+    def _entity_to_coords(self, entity):
+        dxftype = entity.dxftype()
+
+        if dxftype == 'LINE':
+            s = entity.dxf.start
+            e = entity.dxf.end
+            return [(s.x, s.y), (e.x, e.y)]
+
+        if dxftype == 'LWPOLYLINE':
+            pts = [(p[0], p[1]) for p in entity.get_points(format='xy')]
+            if entity.closed and len(pts) > 1:
+                pts.append(pts[0])
+            return pts if len(pts) >= 2 else None
+
+        if dxftype == 'POLYLINE':
+            pts = [(v.dxf.location.x, v.dxf.location.y)
+                   for v in entity.vertices]
+            if entity.is_closed and len(pts) > 1:
+                pts.append(pts[0])
+            return pts if len(pts) >= 2 else None
+
+        if dxftype == 'CIRCLE':
+            cx, cy = entity.dxf.center.x, entity.dxf.center.y
+            r = entity.dxf.radius
+            steps = max(36, int(r * 2))
+            return [(cx + r * math.cos(2 * math.pi * i / steps),
+                     cy + r * math.sin(2 * math.pi * i / steps))
+                    for i in range(steps + 1)]
+
+        if dxftype == 'ARC':
+            cx, cy = entity.dxf.center.x, entity.dxf.center.y
+            r = entity.dxf.radius
+            sa = math.radians(entity.dxf.start_angle)
+            ea = math.radians(entity.dxf.end_angle)
+            if ea <= sa:
+                ea += 2 * math.pi
+            steps = max(18, int((ea - sa) / (2 * math.pi) * 72))
+            return [(cx + r * math.cos(sa + (ea - sa) * i / steps),
+                     cy + r * math.sin(sa + (ea - sa) * i / steps))
+                    for i in range(steps + 1)]
+
+        if dxftype == 'ELLIPSE':
+            try:
+                cx, cy = entity.dxf.center.x, entity.dxf.center.y
+                mx, my = entity.dxf.major_axis.x, entity.dxf.major_axis.y
+                ratio = entity.dxf.ratio
+                sp, ep = entity.dxf.start_param, entity.dxf.end_param
+                if ep <= sp:
+                    ep += 2 * math.pi
+                steps = 72
+                pts = []
+                for i in range(steps + 1):
+                    t = sp + (ep - sp) * i / steps
+                    x = cx + mx * math.cos(t) - my * ratio * math.sin(t)
+                    y = cy + my * math.cos(t) + mx * ratio * math.sin(t)
+                    pts.append((x, y))
+                return pts
+            except Exception:
+                return None
+
+        if dxftype == 'SPLINE':
+            try:
+                pts = [(p.x, p.y) for p in entity.flattening(0.5)]
+                return pts if len(pts) >= 2 else None
+            except Exception:
+                return None
+
+        return None
+
+    def scale_points(self, coordinates):
+        if not coordinates:
+            return []
+
+        xs = [c[0] for c in coordinates]
+        ys = [c[1] for c in coordinates]
+        x_range = max(xs) - min(xs)
+        y_range = max(ys) - min(ys)
+        max_range = max(x_range, y_range, 1.0)
+
+        norm = 10000.0 / max_range
+        x_min, y_min = min(xs), min(ys)
+
+        scale_x = self.config.get('scale_factor_x', 0.09)
+        scale_y = self.config.get('scale_factor_y', 0.09)
+        scale_z = self.config.get('scale_factor_z', 1.0)
+
+        return [((x - x_min) * norm * scale_x,
+                 (y - y_min) * norm * scale_y,
+                 z * scale_z)
+                for x, y, z in coordinates]
+
+
+# ---------------------------------------------------------------------------
 # GPU-Accelerated AI (unchanged, torch-optional)
 # ---------------------------------------------------------------------------
 
@@ -952,6 +1105,7 @@ class CompleteProcessingSystem:
     def __init__(self, config):
         self.config = config
         self.plt_processor = PLTProcessor(config)
+        self.cad_processor = CADFileProcessor(config)
         self.gpu_ai = GPUAcceleratedAI(config)
         self.hopfield_network = GPUHopfieldNetwork(config)
         self.renderer = ScribbleRenderer(config)
@@ -980,31 +1134,51 @@ class CompleteProcessingSystem:
         if accession:
             print(f"  Accession: {accession}")
 
-    def get_plt_files(self, directory):
+    def get_input_files(self, directory):
         try:
             path = Path(directory)
             if not path.exists():
                 print(f"Directory not found: {directory}")
                 return []
 
-            plt_files = list(path.glob("*.plt")) + list(path.glob("*.PLT"))
-            plt_files = sorted(set(plt_files))
-            print(f"Found {len(plt_files)} PLT files")
-            return plt_files
+            exts = ['plt', 'dxf', 'dwg', 'dwx']
+            found = []
+            for ext in exts:
+                found.extend(path.glob(f"*.{ext}"))
+                found.extend(path.glob(f"*.{ext.upper()}"))
+            found = sorted(set(found))
+
+            by_ext = {}
+            for f in found:
+                e = f.suffix.lower()
+                by_ext[e] = by_ext.get(e, 0) + 1
+            breakdown = ', '.join(f"{v} {k}" for k, v in sorted(by_ext.items()))
+            print(f"Found {len(found)} input files ({breakdown})")
+            return found
         except Exception as e:
-            print(f"Error getting PLT files: {e}")
+            print(f"Error scanning input files: {e}")
             return []
+
+    def get_plt_files(self, directory):
+        return self.get_input_files(directory)
 
     def process_single_file(self, plt_file, iteration=0):
         try:
             print(f"\nProcessing: {plt_file.name} (iteration {iteration + 1})")
 
-            raw_coords = self.plt_processor.process_plt_file(str(plt_file))
+            ext = Path(plt_file).suffix.lower()
+            if ext in CADFileProcessor.SUPPORTED_EXTENSIONS:
+                raw_coords = self.cad_processor.process_cad_file(str(plt_file))
+                processor = self.cad_processor
+            else:
+                raw_coords = self.plt_processor.process_plt_file(str(plt_file))
+                processor = self.plt_processor
+
             if not raw_coords:
-                print("  Failed to process PLT file")
+                print(f"  Failed to process {ext} file")
                 return False
 
-            points = self.plt_processor.scale_points(raw_coords)
+            points = processor.scale_points(raw_coords)
             pu_count = sum(1 for _, _, z in points if z != 0)
             pd_count = sum(1 for _, _, z in points if z == 0)
             print(f"  Loaded {len(points)} points (PD={pd_count}, PU={pu_count})")
@@ -1161,9 +1335,9 @@ class CompleteProcessingSystem:
         print("BATCH PROCESSING")
         print("=" * 50)
 
-        plt_files = self.get_plt_files(input_directory)
+        plt_files = self.get_input_files(input_directory)
         if not plt_files:
-            return {'success': False, 'message': 'No PLT files found'}
+            return {'success': False, 'message': 'No input files found (PLT/DXF/DWG/DWX)'}
 
         total_examples = self.config.get('total_examples', 3)
         total_operations = len(plt_files) * total_examples
@@ -1238,8 +1412,8 @@ def quick_test(config, processing_system):
     print(f"5. Input Directory: {'EXISTS' if input_dir.exists() else 'MISSING'}")
 
     if input_dir.exists():
-        plt_files = processing_system.get_plt_files(str(input_dir))
-        print(f"6. PLT Files: {len(plt_files) if plt_files else 'NONE'}")
+        input_files = processing_system.get_input_files(str(input_dir))
+        print(f"6. Input Files (PLT/DXF/DWG/DWX): {len(input_files) if input_files else 'NONE'}")
 
 
 def gpu_status():
@@ -1442,7 +1616,7 @@ def main():
     parser = argparse.ArgumentParser(
         description='GPU-Integrated AI-Enhanced Scribble Plotter')
     parser.add_argument('--input', '-i', type=str,
-                        help='Input directory containing PLT files')
+                        help='Input directory containing PLT, DXF, DWG, or DWX files')
     parser.add_argument('--output', '-o', type=str,
                         help='Base output directory')
     parser.add_argument('--examples', '-e', type=int, default=3,
@@ -1529,11 +1703,11 @@ def main():
     else:
         input_dir = CONFIG.get('directories')['input']
 
-    plt_files = PROCESSING_SYSTEM.get_plt_files(input_dir)
+    plt_files = PROCESSING_SYSTEM.get_input_files(input_dir)
 
     if not plt_files:
-        print(f"\nNo PLT files found in: {input_dir}")
-        print("Place your .plt files in the input directory and run again.")
+        print(f"\nNo input files found in: {input_dir}")
+        print("Place .plt, .dxf, .dwg, or .dwx files in the input directory and run again.")
         print("\nAvailable commands:")
         print("  --test            Run system test")
         print("  --demo            Run Hopfield demo")

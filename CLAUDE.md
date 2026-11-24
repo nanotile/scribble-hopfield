@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-GPU-Integrated AI-Enhanced Scribble Plotter v4.0 - Converts PLT vector graphics into artistic "scribble" renderings using GPU-accelerated AI and Hopfield neural networks, with optional biological sequence encoding that embeds DNA or protein data as vector geometry. Inspired by Kent Benson's 1983-1986 Hopfield Network research.
+GPU-Integrated AI-Enhanced Scribble Plotter v4.0 - Converts PLT, DXF, DWG, and DWX vector graphics into artistic "scribble" renderings using GPU-accelerated AI and Hopfield neural networks, with optional biological sequence encoding that embeds DNA or protein data as vector geometry. Inspired by Kent Benson's 1983-1986 Hopfield Network research.
 
 ## Running Locally
 
@@ -29,8 +29,8 @@ pip install -r requirements.txt
 # Hopfield network demo
 ./venv/bin/python scribble_plotter_local.py --demo
 
-# Process PLT files (default: 3 variations each, outputs PNG/PDF/DXF/SVG)
-./venv/bin/python scribble_plotter_local.py --input /path/to/plt/files
+# Process input files (PLT, DXF, DWG, DWX — 3 variations each, outputs PNG/PDF/DXF/SVG)
+./venv/bin/python scribble_plotter_local.py --input /path/to/files
 
 # Process with custom settings
 ./venv/bin/python scribble_plotter_local.py --input ./files --examples 5 --output ./results
@@ -59,7 +59,7 @@ pip install -r requirements.txt
 ```
 
 **Input/Output:**
-- Place `.plt` files in `ScribblePlotter_Output/input/`
+- Place `.plt`, `.dxf`, `.dwg`, or `.dwx` files in `ScribblePlotter_Output/input/`
 - Output saved to `ScribblePlotter_Output/output/` (PNG, PDF, DXF, SVG)
 - GROUP directories aggregate outputs: `GROUP_PDF/`, `GROUP_DXF/`, `GROUP_PNG/`, `GROUP_SVG/`
 
@@ -91,6 +91,7 @@ The system consists of these main classes organized in a processing pipeline:
 |-------|---------|
 | `CompleteConfiguration` | GPU detection, JSON config persistence (machine-specific keys never saved) |
 | `PLTProcessor` | Unified HPGL parser — handles PU/PD/PA with integer, decimal, negative coords and multiple pairs per command |
+| `CADFileProcessor` | Reads DXF/DWG/DWX via ezdxf, extracts LINE/POLYLINE/CIRCLE/ARC/ELLIPSE/SPLINE entities, auto-normalizes coordinates |
 | `GPUAcceleratedAI` | Feature extraction (15-feature vectors), parameter prediction with GPU/CPU fallback |
 | `GPUHopfieldNetwork` | Stores artistic patterns (200 capacity), Hebbian learning, spurious memory detection |
 | `ScribbleGenerator` | Generates scribbled geometry once from points + params (random or sequence-driven wobble) |
@@ -103,7 +104,8 @@ The system consists of these main classes organized in a processing pipeline:
 ### Data Flow
 
 ```
-PLT Files → PLTProcessor → GPUAcceleratedAI (feature extraction)
+Input Files → PLTProcessor (PLT) or CADFileProcessor (DXF/DWG/DWX)
+         → GPUAcceleratedAI (feature extraction)
          → GPUHopfieldNetwork (pattern recall)
          → ScribbleGenerator (wobble geometry, generated ONCE)
          → ScribbleRenderer (PNG/PDF) + SVGExporter (SVG) + DXF writer
