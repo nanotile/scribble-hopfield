@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 GPU-Integrated AI-Enhanced Scribble Plotter - Local Version
-Adapted from Google Colab notebook for local execution
+Module: scribble_plotter_local.py
+Version: 4.0.0
+Iteration: v1
+Developer: Kent Benson
+UV Environment: pip install -r requirements.txt
 """
 
 import os
@@ -9,16 +13,24 @@ import json
 import re
 import random
 import math
+import hashlib
 import shutil
 import warnings
 import argparse
 
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import torch
 from pathlib import Path
 from tqdm import tqdm
 from datetime import datetime
+
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 
 warnings.filterwarnings('ignore')
 
@@ -27,43 +39,100 @@ print("Honoring Kent Benson's 1983-1986 Hopfield Network Research")
 print("=" * 70)
 
 
-def setup_complete_system(base_dir: str = None):
-    """Setup GPU acceleration and project structure"""
+# ---------------------------------------------------------------------------
+# Sequence encoding constants
+# ---------------------------------------------------------------------------
 
-    print("Setting up complete system with GPU acceleration...")
+DNA_SYMBOLS = 'ACGT'
+AMINO_ACID_SYMBOLS = 'ACDEFGHIKLMNPQRSTVWY'
+ENCODING_VERSION = 1
 
-    # Use provided base_dir or default to current directory
+
+def _build_encoding_map(alphabet_type):
+    symbols = DNA_SYMBOLS if alphabet_type == 'dna' else AMINO_ACID_SYMBOLS
+    n = len(symbols)
+    enc = {sym: (2 * k + 1 - n) / n for k, sym in enumerate(symbols)}
+    if alphabet_type == 'dna':
+        enc['U'] = enc['T']
+    return enc
+
+
+def _build_decoding_table(alphabet_type):
+    symbols = DNA_SYMBOLS if alphabet_type == 'dna' else AMINO_ACID_SYMBOLS
+    n = len(symbols)
+    levels = [(2 * k + 1 - n) / n for k in range(n)]
+    return symbols, levels
+
+
+def detect_alphabet(sequence):
+    unique = set(sequence.upper()) - {'N', '-', ' ', '\n', '\r'}
+    if unique <= set('ACGTU'):
+        return 'dna'
+    return 'protein'
+
+
+def read_fasta(path):
+    header = ''
+    seq_parts = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('>'):
+                header = line[1:]
+            elif line and not line.startswith('#'):
+                seq_parts.append(line.upper())
+    sequence = ''.join(seq_parts)
+    # Strip characters that aren't part of the alphabet
+    alpha = detect_alphabet(sequence)
+    valid = set(DNA_SYMBOLS + 'U') if alpha == 'dna' else set(AMINO_ACID_SYMBOLS)
+    cleaned = ''.join(c for c in sequence if c in valid)
+    return header, cleaned
+
+
+def parse_fasta_header(header):
+    parts = header.split()
+    name = parts[0] if parts else 'unknown'
+    accession = None
+    if '|' in name:
+        segments = name.split('|')
+        for seg in segments:
+            if seg and seg[0].isalpha():
+                accession = seg
+                break
+    elif '.' in name:
+        accession = name.split('.')[0]
+    else:
+        accession = name
+    return name, accession
+
+
+# ---------------------------------------------------------------------------
+# System setup
+# ---------------------------------------------------------------------------
+
+def setup_complete_system(base_dir=None):
+    print("Setting up complete system...")
+
     if base_dir is None:
         base_dir = Path.cwd() / "ScribblePlotter_Output"
     else:
         base_dir = Path(base_dir)
 
-    # GPU Detection and Setup
-    gpu_available = torch.cuda.is_available()
-    print(f"GPU Available: {'YES' if gpu_available else 'NO'}")
+    gpu_available = False
+    device_str = 'cpu'
 
-    if gpu_available:
-        device = torch.device('cuda')
-        print(f"GPU Type: {torch.cuda.get_device_name(0)}")
-        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory // 1024**3} GB")
-
-        # Test GPU performance
-        print("GPU Performance Test...")
-        a = torch.randn(2000, 2000, device=device)
-        b = torch.randn(2000, 2000, device=device)
-
-        import time
-        start = time.time()
-        _ = torch.mm(a, b)
-        torch.cuda.synchronize()
-        gpu_time = time.time() - start
-
-        print(f"GPU Matrix Test: {gpu_time:.3f} seconds")
+    if TORCH_AVAILABLE:
+        gpu_available = torch.cuda.is_available()
+        print(f"GPU Available: {'YES' if gpu_available else 'NO'}")
+        if gpu_available:
+            device_str = 'cuda'
+            print(f"GPU Type: {torch.cuda.get_device_name(0)}")
+            print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_mem // 1024**3} GB")
+        else:
+            print("Running on CPU (no GPU detected)")
     else:
-        device = torch.device('cpu')
-        print("Running on CPU (no GPU detected)")
+        print("PyTorch not installed — running on CPU (numpy fallback)")
 
-    # Create project structure
     directories = {
         'base': str(base_dir),
         'input': str(base_dir / 'input'),
@@ -75,17 +144,23 @@ def setup_complete_system(base_dir: str = None):
 
     for name, path in directories.items():
         os.makedirs(path, exist_ok=True)
-        print(f"Created: {name} -> {path}")
 
     return {
         'gpu_available': gpu_available,
-        'device': device,
+        'device': device_str,
         'directories': directories
     }
 
 
+# ---------------------------------------------------------------------------
+# Configuration — machine-specific keys are never loaded from disk
+# ---------------------------------------------------------------------------
+
 class CompleteConfiguration:
-    """Complete configuration system with GPU settings"""
+    MACHINE_SPECIFIC_KEYS = frozenset({
+        'directories', 'device', 'gpu_enabled',
+        'use_gpu_acceleration', 'use_gpu_ai', 'use_gpu_hopfield',
+    })
 
     def __init__(self, system_info):
         self.system_info = system_info
@@ -94,11 +169,11 @@ class CompleteConfiguration:
 
         self.defaults = {
             'project_name': 'GPU-Enhanced Scribble Plotter',
-            'version': '3.0-local',
+            'version': '4.0-local',
             'author': 'Kent Benson',
             'inspiration': '1983-1986 Hopfield Network Research',
             'gpu_enabled': system_info['gpu_available'],
-            'device': str(system_info['device']),
+            'device': system_info['device'],
             'directories': system_info['directories'],
             'total_examples': 3,
             'batch_size': 8,
@@ -106,6 +181,7 @@ class CompleteConfiguration:
             'generate_pdf': True,
             'generate_dxf': True,
             'generate_png': True,
+            'generate_svg': True,
             'organize_groups': True,
             'output_dpi': 300,
             'page_width': 800,
@@ -138,6 +214,8 @@ class CompleteConfiguration:
             if os.path.exists(self.config_file):
                 with open(self.config_file, 'r') as f:
                     loaded = json.load(f)
+                for key in self.MACHINE_SPECIFIC_KEYS:
+                    loaded.pop(key, None)
                 config = {**self.defaults, **loaded}
                 print("Configuration loaded")
             else:
@@ -151,7 +229,9 @@ class CompleteConfiguration:
 
     def save_config(self, config=None):
         try:
-            config_to_save = config or self.config
+            config_to_save = dict(config or self.config)
+            for key in self.MACHINE_SPECIFIC_KEYS:
+                config_to_save.pop(key, None)
             with open(self.config_file, 'w') as f:
                 json.dump(config_to_save, f, indent=2)
         except Exception as e:
@@ -175,44 +255,31 @@ class CompleteConfiguration:
         print(f"Hopfield Networks: {'Enabled' if self.get('use_hopfield_memory') else 'Disabled'}")
 
 
+# ---------------------------------------------------------------------------
+# PLT Parser — unified HPGL parser
+# ---------------------------------------------------------------------------
+
 class PLTProcessor:
-    """Core PLT file processing with GPU optimization"""
+    _coord_re = re.compile(r'(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)')
 
     def __init__(self, config):
         self.config = config
-        self.device = torch.device(config.get('device', 'cpu'))
-        self.setup_patterns()
-
-    def setup_patterns(self):
-        self.patterns = {
-            'PD': re.compile(r'PD(\d+),(\d+)'),
-            'PD_neg_x': re.compile(r'PD-(\d+),(\d+)'),
-            'PD_neg_y': re.compile(r'PD(\d+),-(\d+)'),
-            'PD_neg_both': re.compile(r'PD-(\d+),-(\d+)'),
-            'PA': re.compile(r'PA(\d+)\.(\d+),(\d+)\.(\d+)'),
-            'PU': re.compile(r'PU(\d+)\.(\d+),(\d+)\.(\d+)'),
-        }
 
     def process_plt_file(self, file_path):
         try:
             with open(file_path, 'r') as f:
                 content = f.read()
 
-            # Detect format from first non-whitespace character
             stripped = content.lstrip()
             if stripped and (stripped[0].isdigit() or stripped[0] == '-'):
                 return self.process_raw_coordinates(content)
-            elif 'PW0' in content[:200]:
-                return self.process_acme_convert(content)
             else:
-                return self.process_acme_trace(content)
-
+                return self.parse_hpgl(content)
         except Exception as e:
             print(f"PLT processing error: {e}")
             return []
 
     def process_raw_coordinates(self, content):
-        """Parse pre-processed x,y,z; coordinate triplets."""
         coordinates = []
         content = content.replace('\n', '').replace('\r', '')
         for token in content.split(';'):
@@ -227,51 +294,34 @@ class PLTProcessor:
                     continue
         return coordinates
 
-    def process_acme_convert(self, content):
-        content = content.replace('\n', '').replace('\r', '')
-        lines = content.split(';')
-        return self.extract_coordinates(lines)
-
-    def process_acme_trace(self, content):
-        lines = content.split(';')
-        return self.extract_coordinates(lines)
-
-    def extract_coordinates(self, lines):
+    def parse_hpgl(self, content):
         coordinates = []
+        pen_down = False
 
-        for line in lines:
-            line = line.strip()
-            if not line:
+        content = content.replace('\n', '').replace('\r', '')
+        commands = content.split(';')
+
+        for cmd in commands:
+            cmd = cmd.strip()
+            if not cmd:
                 continue
 
-            for pattern_name, pattern in self.patterns.items():
-                match = pattern.match(line)
-                if match:
-                    coord = self.process_match(pattern_name, match)
-                    if coord:
-                        coordinates.append(coord)
-                    break
+            if cmd.startswith('PU'):
+                pen_down = False
+                for x_str, y_str in self._coord_re.findall(cmd[2:]):
+                    coordinates.append((float(x_str), float(y_str), 10.0))
 
-        coordinates.reverse()
+            elif cmd.startswith('PD'):
+                pen_down = True
+                for x_str, y_str in self._coord_re.findall(cmd[2:]):
+                    coordinates.append((float(x_str), float(y_str), 0.0))
+
+            elif cmd.startswith('PA'):
+                z_val = 0.0 if pen_down else 10.0
+                for x_str, y_str in self._coord_re.findall(cmd[2:]):
+                    coordinates.append((float(x_str), float(y_str), z_val))
+
         return coordinates
-
-    def process_match(self, pattern_name, match):
-        groups = match.groups()
-
-        if pattern_name == 'PD':
-            return (float(groups[0]), float(groups[1]), 0.0)
-        elif pattern_name == 'PD_neg_x':
-            return (-float(groups[0]), float(groups[1]), 0.0)
-        elif pattern_name == 'PD_neg_y':
-            return (float(groups[0]), -float(groups[1]), 0.0)
-        elif pattern_name == 'PD_neg_both':
-            return (-float(groups[0]), -float(groups[1]), 0.0)
-        elif pattern_name == 'PA':
-            return (float(groups[0]), float(groups[2]), 0.0)
-        elif pattern_name == 'PU':
-            return (float(groups[0]), float(groups[2]), 10.0)
-
-        return None
 
     def scale_points(self, coordinates):
         if not coordinates:
@@ -281,27 +331,24 @@ class PLTProcessor:
         scale_y = self.config.get('scale_factor_y', 0.09)
         scale_z = self.config.get('scale_factor_z', 1.0)
 
-        scaled = []
-        for x, y, z in coordinates:
-            scaled.append((x * scale_x, y * scale_y, z * scale_z))
+        return [(x * scale_x, y * scale_y, z * scale_z) for x, y, z in coordinates]
 
-        return scaled
 
+# ---------------------------------------------------------------------------
+# GPU-Accelerated AI (unchanged, torch-optional)
+# ---------------------------------------------------------------------------
 
 class GPUAcceleratedAI:
-    """Complete GPU-accelerated AI system"""
-
     def __init__(self, config):
         self.config = config
-        self.device = torch.device(config.get('device', 'cpu'))
-        self.gpu_available = config.get('gpu_enabled', False)
+        self.gpu_available = config.get('gpu_enabled', False) and TORCH_AVAILABLE
 
         if self.gpu_available:
+            self.device = torch.device(config.get('device', 'cpu'))
             print("Initializing GPU-accelerated AI...")
             torch.cuda.empty_cache()
-            if hasattr(torch.cuda, 'set_per_process_memory_fraction'):
-                torch.cuda.set_per_process_memory_fraction(config.get('gpu_memory_fraction', 0.8))
         else:
+            self.device = None
             print("Initializing CPU AI...")
 
     def extract_features_gpu(self, points):
@@ -310,7 +357,6 @@ class GPUAcceleratedAI:
                 return np.zeros(15)
 
             coords = np.array([(p[0], p[1]) for p in points if p[2] == 0])
-
             if len(coords) < 2:
                 return np.zeros(15)
 
@@ -320,7 +366,6 @@ class GPUAcceleratedAI:
                 return features.cpu().numpy()
             else:
                 return self._cpu_feature_calculation(coords)
-
         except Exception as e:
             print(f"Feature extraction error: {e}")
             return np.zeros(15)
@@ -427,7 +472,6 @@ class GPUAcceleratedAI:
                 'complexity_score': complexity,
                 'generation_method': 'gpu_ai' if self.gpu_available else 'cpu_ai'
             }
-
         except Exception as e:
             print(f"Parameter prediction error: {e}")
             return {
@@ -440,21 +484,24 @@ class GPUAcceleratedAI:
             }
 
 
-class GPUHopfieldNetwork:
-    """GPU-accelerated Hopfield network for style memory"""
+# ---------------------------------------------------------------------------
+# GPU Hopfield Network (unchanged, torch-optional)
+# ---------------------------------------------------------------------------
 
+class GPUHopfieldNetwork:
     def __init__(self, config):
         self.config = config
-        self.device = torch.device(config.get('device', 'cpu'))
-        self.gpu_available = config.get('gpu_enabled', False)
+        self.gpu_available = config.get('gpu_enabled', False) and TORCH_AVAILABLE
 
         self.pattern_size = config.get('hopfield_pattern_size', 15)
         self.memory_size = config.get('hopfield_memory_size', 200)
 
         if self.gpu_available:
+            self.device = torch.device(config.get('device', 'cpu'))
             self.weights = torch.zeros(self.pattern_size, self.pattern_size, device=self.device)
             print("GPU Hopfield network initialized")
         else:
+            self.device = None
             self.weights = np.zeros((self.pattern_size, self.pattern_size))
             print("CPU Hopfield network initialized")
 
@@ -480,7 +527,6 @@ class GPUHopfieldNetwork:
 
             print(f"Stored pattern '{label}' ({len(self.stored_patterns)}/{self.memory_size})")
             return True
-
         except Exception as e:
             print(f"Pattern storage error: {e}")
             return False
@@ -491,167 +537,334 @@ class GPUHopfieldNetwork:
                 return self._gpu_recall(partial_pattern, max_iterations)
             else:
                 return self._cpu_recall(partial_pattern, max_iterations)
-
         except Exception as e:
             print(f"Pattern recall error: {e}")
             return partial_pattern
 
     def _gpu_recall(self, partial_pattern, max_iterations):
         current = self._normalize_pattern_gpu(partial_pattern)
-
-        for iteration in range(max_iterations):
+        for _ in range(max_iterations):
             previous = current.clone()
             activations = torch.mv(self.weights, current)
             current = torch.sign(activations)
-
             if torch.equal(current, previous):
                 break
-
         return self._denormalize_pattern_gpu(current)
 
     def _cpu_recall(self, partial_pattern, max_iterations):
         current = self._normalize_pattern_cpu(partial_pattern)
-
-        for iteration in range(max_iterations):
+        for _ in range(max_iterations):
             previous = current.copy()
-
             for i in range(len(current)):
                 activation = np.dot(self.weights[i], current)
                 current[i] = 1 if activation > 0 else -1
-
             if np.array_equal(current, previous):
                 break
-
         return self._denormalize_pattern_cpu(current)
 
     def find_spurious_memories(self, test_patterns):
         spurious_memories = []
-
-        print("Searching for spurious memories...")
-        print("Exploring 'illogical associations' that lead to plausible new states")
-
-        for i, test_pattern in enumerate(test_patterns):
+        for test_pattern in test_patterns:
             recalled = self.recall_pattern(test_pattern)
-
-            is_stored = False
-            for stored in self.stored_patterns:
-                if self._patterns_similar(recalled, stored):
-                    is_stored = True
-                    break
-
+            is_stored = any(self._patterns_similar(recalled, s) for s in self.stored_patterns)
             if not is_stored:
                 spurious_memories.append(recalled)
-                print(f"Found spurious memory {len(spurious_memories)}")
-
         return spurious_memories
 
     def _patterns_similar(self, pattern1, pattern2, threshold=0.9):
         if len(pattern1) != len(pattern2):
             return False
-
-        if self.gpu_available and hasattr(pattern1, 'device'):
-            pattern1 = pattern1.cpu().numpy()
-        if self.gpu_available and hasattr(pattern2, 'device'):
-            pattern2 = pattern2.cpu().numpy()
-
-        correlation = np.corrcoef(pattern1, pattern2)[0, 1]
+        p1 = pattern1.cpu().numpy() if hasattr(pattern1, 'cpu') else np.asarray(pattern1)
+        p2 = pattern2.cpu().numpy() if hasattr(pattern2, 'cpu') else np.asarray(pattern2)
+        correlation = np.corrcoef(p1, p2)[0, 1]
         return abs(correlation) > threshold
 
     def _normalize_pattern_gpu(self, pattern):
-        pattern_tensor = torch.tensor(pattern[:self.pattern_size],
-                                      dtype=torch.float32, device=self.device)
-
-        if len(pattern_tensor) < self.pattern_size:
-            padding = torch.zeros(self.pattern_size - len(pattern_tensor), device=self.device)
-            pattern_tensor = torch.cat([pattern_tensor, padding])
-
-        if torch.std(pattern_tensor) > 0:
-            pattern_tensor = (pattern_tensor - torch.mean(pattern_tensor)) / torch.std(pattern_tensor)
-
-        return torch.sign(pattern_tensor)
+        pt = torch.tensor(pattern[:self.pattern_size], dtype=torch.float32, device=self.device)
+        if len(pt) < self.pattern_size:
+            pt = torch.cat([pt, torch.zeros(self.pattern_size - len(pt), device=self.device)])
+        if torch.std(pt) > 0:
+            pt = (pt - torch.mean(pt)) / torch.std(pt)
+        return torch.sign(pt)
 
     def _denormalize_pattern_gpu(self, pattern):
         return ((pattern + 1) / 2).cpu().numpy()
 
     def _normalize_pattern_cpu(self, pattern):
-        pattern = np.array(pattern[:self.pattern_size])
-        if len(pattern) < self.pattern_size:
-            pattern = np.pad(pattern, (0, self.pattern_size - len(pattern)))
-
-        if np.std(pattern) > 0:
-            pattern = (pattern - np.mean(pattern)) / np.std(pattern)
-
-        return np.sign(pattern)
+        p = np.array(pattern[:self.pattern_size], dtype=float)
+        if len(p) < self.pattern_size:
+            p = np.pad(p, (0, self.pattern_size - len(p)))
+        if np.std(p) > 0:
+            p = (p - np.mean(p)) / np.std(p)
+        return np.sign(p)
 
     def _denormalize_pattern_cpu(self, pattern):
         return (pattern + 1) / 2
 
 
-class ScribbleRenderer:
-    """Enhanced scribble renderer"""
+# ---------------------------------------------------------------------------
+# Scribble geometry generator — produces wobbled paths once for all exporters
+# ---------------------------------------------------------------------------
 
+class ScribbleGenerator:
     def __init__(self, config):
         self.config = config
 
-    def render_artwork(self, points, params):
-        try:
-            if not points:
-                return None
+    def generate(self, points, params, sequence=None, seq_info=None):
+        """Generate scribbled strokes from point data.
 
-            fig_width = self.config.get('page_width', 800) / 100
-            fig_height = self.config.get('page_height', 600) / 100
+        Returns (strokes, encoding_info).
+        strokes: list of strokes, each a list of (x, y) waypoints.
+        encoding_info: dict with sequence metadata, or None.
+        """
+        steps = params['steps']
+        amplitude = params['scribble']
 
-            fig, ax = plt.subplots(figsize=(fig_width, fig_height))
-            ax.set_aspect('equal')
-            ax.set_facecolor('white')
-            ax.axis('off')
+        encoding_map = None
+        alphabet_type = None
+        if sequence:
+            alphabet_type = detect_alphabet(sequence)
+            encoding_map = _build_encoding_map(alphabet_type)
+            fallback_rng = random.Random(
+                int.from_bytes(hashlib.sha256(sequence.encode()).digest()[:8], 'big'))
+        else:
+            fallback_rng = None
 
-            steps = params['steps']
-            scrib_val = params['scribble']
-            stroke_weight = params['stroke_weight']
-            color = params['color']
+        strokes = []
+        current_stroke = []
+        seq_idx = 0
+        stroke_seq_ranges = []
+        stroke_seq_start = 0
 
-            for i in range(len(points) - 1):
-                x1, y1, z1 = points[i]
+        for i in range(len(points) - 1):
+            x1, y1, z1 = points[i]
+            x2, y2, z2 = points[i + 1]
 
-                if z1 == 0:
-                    x2, y2, z2 = points[i + 1] if i + 1 < len(points) else points[i]
+            if z2 == 0.0:
+                if not current_stroke:
+                    current_stroke = [(x1, y1)]
+                    stroke_seq_start = seq_idx
 
-                    x_step = (x2 - x1) / steps
-                    y_step = (y2 - y1) / steps
+                waypoints, seq_idx = self._scribble_segment(
+                    x1, y1, x2, y2, steps, amplitude,
+                    sequence, seq_idx, encoding_map, fallback_rng)
 
-                    current_x, current_y = x1, y1
+                current_stroke.extend(waypoints[1:])
+            else:
+                if current_stroke:
+                    strokes.append(current_stroke)
+                    stroke_seq_ranges.append((stroke_seq_start, seq_idx))
+                    current_stroke = []
 
-                    for step in range(steps):
-                        if step < steps - 1:
-                            next_x = current_x + x_step + random.uniform(-scrib_val, scrib_val)
-                            next_y = current_y + y_step + random.uniform(-scrib_val, scrib_val)
-                        else:
-                            next_x, next_y = x2, y2
+        if current_stroke:
+            strokes.append(current_stroke)
+            stroke_seq_ranges.append((stroke_seq_start, seq_idx))
 
-                        ax.plot([current_x, next_x], [current_y, next_y],
-                                color=color, linewidth=stroke_weight / 5, alpha=0.8)
+        encoding_info = None
+        if sequence:
+            capacity = self._count_capacity(points, steps)
+            embedded = min(seq_idx, len(sequence))
+            encoding_info = {
+                'embedded_count': embedded,
+                'total_bases': len(sequence),
+                'capacity': capacity,
+                'stroke_seq_ranges': stroke_seq_ranges,
+                'alphabet': alphabet_type,
+                'steps': steps,
+                'amplitude': amplitude,
+                'version': ENCODING_VERSION,
+            }
+            if seq_info:
+                encoding_info.update(seq_info)
 
-                        current_x, current_y = next_x, next_y
+        return strokes, encoding_info
 
-            ax.set_xlim(auto=True)
-            ax.set_ylim(auto=True)
-            ax.invert_yaxis()
-            plt.tight_layout()
+    def _scribble_segment(self, x1, y1, x2, y2, steps, amplitude,
+                          sequence, seq_idx, encoding_map, fallback_rng):
+        waypoints = [(x1, y1)]
 
-            return fig
+        if steps < 1:
+            waypoints.append((x2, y2))
+            return waypoints, seq_idx
 
-        except Exception as e:
-            print(f"Rendering error: {e}")
-            # Close any partially-created figure to prevent memory leak
-            plt.close('all')
+        dx = x2 - x1
+        dy = y2 - y1
+        seg_len = math.hypot(dx, dy)
+
+        if seg_len < 1e-10:
+            return waypoints, seq_idx
+
+        if sequence is not None and encoding_map is not None:
+            perp_x = -dy / seg_len
+            perp_y = dx / seg_len
+
+            for step_num in range(1, steps):
+                t = step_num / steps
+                ideal_x = x1 + t * dx
+                ideal_y = y1 + t * dy
+
+                if seq_idx < len(sequence):
+                    base = sequence[seq_idx]
+                    level = encoding_map.get(base, 0.0)
+                    point_x = ideal_x + level * amplitude * perp_x
+                    point_y = ideal_y + level * amplitude * perp_y
+                    seq_idx += 1
+                else:
+                    offset = fallback_rng.uniform(-amplitude, amplitude)
+                    point_x = ideal_x + offset * perp_x
+                    point_y = ideal_y + offset * perp_y
+
+                waypoints.append((point_x, point_y))
+
+            waypoints.append((x2, y2))
+        else:
+            x_step = dx / steps
+            y_step = dy / steps
+            cx, cy = x1, y1
+
+            for step in range(steps):
+                if step < steps - 1:
+                    nx = cx + x_step + random.uniform(-amplitude, amplitude)
+                    ny = cy + y_step + random.uniform(-amplitude, amplitude)
+                else:
+                    nx, ny = x2, y2
+                waypoints.append((nx, ny))
+                cx, cy = nx, ny
+
+        return waypoints, seq_idx
+
+    def _count_capacity(self, points, steps):
+        count = 0
+        for i in range(len(points) - 1):
+            _, _, z2 = points[i + 1]
+            if z2 == 0.0:
+                x1, y1, _ = points[i]
+                x2, y2, _ = points[i + 1]
+                if math.hypot(x2 - x1, y2 - y1) >= 1e-10:
+                    count += steps - 1
+        return count
+
+
+# ---------------------------------------------------------------------------
+# Scribble renderer — draws pre-generated strokes via matplotlib
+# ---------------------------------------------------------------------------
+
+class ScribbleRenderer:
+    def __init__(self, config):
+        self.config = config
+
+    def render_from_strokes(self, strokes, params):
+        if not strokes:
             return None
 
+        fig_width = self.config.get('page_width', 800) / 100
+        fig_height = self.config.get('page_height', 600) / 100
+
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+        ax.set_aspect('equal')
+        ax.set_facecolor('white')
+        ax.axis('off')
+
+        color = params.get('color', (0, 0, 0))
+        stroke_weight = params.get('stroke_weight', 3.0)
+        lw = stroke_weight / 5
+
+        for stroke in strokes:
+            xs = [p[0] for p in stroke]
+            ys = [p[1] for p in stroke]
+            ax.plot(xs, ys, color=color, linewidth=lw, alpha=0.8)
+
+        ax.set_xlim(auto=True)
+        ax.set_ylim(auto=True)
+        ax.invert_yaxis()
+        plt.tight_layout()
+        return fig
+
+
+# ---------------------------------------------------------------------------
+# SVG exporter — writes paths directly, embeds sequence metadata
+# ---------------------------------------------------------------------------
+
+class SVGExporter:
+    def export(self, strokes, output_path, params, encoding_info=None):
+        all_x = [p[0] for s in strokes for p in s]
+        all_y = [p[1] for s in strokes for p in s]
+        if not all_x:
+            return False
+
+        min_x, max_x = min(all_x), max(all_x)
+        min_y, max_y = min(all_y), max(all_y)
+
+        pad = max(max_x - min_x, max_y - min_y) * 0.05
+        vb_x = min_x - pad
+        vb_w = (max_x - min_x) + 2 * pad
+        vb_h = (max_y - min_y) + 2 * pad
+
+        color = params.get('color', (0, 0, 0))
+        stroke_weight = params.get('stroke_weight', 3.0)
+        hex_color = '#{:02x}{:02x}{:02x}'.format(
+            int(color[0] * 255), int(color[1] * 255), int(color[2] * 255))
+        lw = stroke_weight / 5
+
+        lines = []
+        lines.append('<?xml version="1.0" encoding="utf-8"?>')
+        lines.append('<svg xmlns="http://www.w3.org/2000/svg"')
+        lines.append(f'     viewBox="{vb_x:.6f} {-(max_y + pad):.6f} {vb_w:.6f} {vb_h:.6f}"')
+        lines.append(f'     width="{vb_w:.1f}" height="{vb_h:.1f}">')
+
+        if encoding_info:
+            lines.append('  <metadata>')
+            ei = encoding_info
+            lines.append(f'    <scribble-encoding xmlns="urn:scribble-plotter:encoding:{ei["version"]}"')
+            lines.append(f'        version="{ei["version"]}"')
+            lines.append('        method="perpendicular-displacement"')
+            lines.append(f'        alphabet="{ei["alphabet"]}"')
+            lines.append(f'        amplitude="{ei["amplitude"]:.10f}"')
+            lines.append(f'        steps="{ei["steps"]}">')
+            seq_name = ei.get('sequence_name', 'unknown')
+            accession = ei.get('accession', '')
+            acc_attr = f' accession="{accession}"' if accession else ''
+            lines.append(f'      <sequence name="{seq_name}"{acc_attr}'
+                         f' length="{ei["total_bases"]}"'
+                         f' embedded="{ei["embedded_count"]}" />')
+            lines.append('    </scribble-encoding>')
+            lines.append('  </metadata>')
+
+        lines.append(f'  <g stroke="{hex_color}" stroke-width="{lw:.3f}"'
+                     f' fill="none" stroke-linecap="round" stroke-linejoin="round">')
+
+        stroke_ranges = encoding_info['stroke_seq_ranges'] if encoding_info else []
+
+        for s_idx, stroke in enumerate(strokes):
+            path_parts = []
+            for j, (px, py) in enumerate(stroke):
+                cmd = 'M' if j == 0 else 'L'
+                path_parts.append(f'{cmd}{px:.6f},{-py:.6f}')
+
+            data_attrs = ''
+            if encoding_info and s_idx < len(stroke_ranges):
+                s_start, s_end = stroke_ranges[s_idx]
+                if s_end > s_start:
+                    data_attrs = (f' data-seq-start="{s_start}"'
+                                  f' data-seq-end="{s_end - 1}"')
+
+            lines.append(f'    <path d="{" ".join(path_parts)}"{data_attrs} />')
+
+        lines.append('  </g>')
+        lines.append('</svg>')
+
+        with open(output_path, 'w') as f:
+            f.write('\n'.join(lines))
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Directory manager (unchanged)
+# ---------------------------------------------------------------------------
 
 class DirectoryManager:
-    """Manages per-file working directories and GROUP aggregate directories"""
-
-    GROUP_DIRS = ['GROUP_PDF', 'GROUP_DXF', 'GROUP_PNG', 'GROUP_TIFF', 'GROUP_TRANSFORM']
+    GROUP_DIRS = ['GROUP_PDF', 'GROUP_DXF', 'GROUP_PNG', 'GROUP_SVG',
+                  'GROUP_TIFF', 'GROUP_TRANSFORM']
 
     def __init__(self, config):
         self.config = config
@@ -660,7 +873,6 @@ class DirectoryManager:
         print("Directory manager initialized")
 
     def create_working_directories(self, base_dir, file_base_name, file_index):
-        """Create per-file working directories and GROUP aggregate directories"""
         try:
             working_dir = Path(base_dir) / f"{file_base_name}_{file_index}"
 
@@ -668,10 +880,10 @@ class DirectoryManager:
                 'pdf': working_dir / 'PDF',
                 'dxf': working_dir / 'DXF',
                 'png': working_dir / 'PNG',
+                'svg': working_dir / 'SVG',
                 'tmp': working_dir / 'TMP',
             }
 
-            # GROUP directories at the base output level
             for gdir in self.GROUP_DIRS:
                 directories[gdir.lower()] = Path(base_dir) / gdir
 
@@ -679,13 +891,11 @@ class DirectoryManager:
                 path.mkdir(parents=True, exist_ok=True)
 
             return {name: str(path) for name, path in directories.items()}
-
         except Exception as e:
             print(f"Directory creation error: {e}")
             return {}
 
     def register_file(self, file_path, file_type):
-        """Register a processed output file for later GROUP organization"""
         self.processed_files.append(file_path)
         self.file_registry[file_path] = {
             'type': file_type,
@@ -693,7 +903,6 @@ class DirectoryManager:
         }
 
     def organize_output_files(self):
-        """Copy all registered output files to GROUP directories (non-destructive)"""
         if not self.config.get('organize_groups', True):
             return
 
@@ -711,6 +920,7 @@ class DirectoryManager:
                     '.pdf': 'GROUP_PDF',
                     '.dxf': 'GROUP_DXF',
                     '.png': 'GROUP_PNG',
+                    '.svg': 'GROUP_SVG',
                     '.tiff': 'GROUP_TIFF',
                     '.tif': 'GROUP_TIFF',
                 }
@@ -722,8 +932,7 @@ class DirectoryManager:
                 group_dir = base_output / group_name
                 group_dir.mkdir(exist_ok=True)
 
-                # Prefix with parent dir name to prevent filename collisions
-                parent_name = source.parent.parent.name  # e.g. "rectangle_0"
+                parent_name = source.parent.parent.name
                 dest_name = f"{parent_name}_{source.name}"
                 destination = group_dir / dest_name
 
@@ -731,26 +940,45 @@ class DirectoryManager:
                 copied_count += 1
 
             print(f"Organized {copied_count} files into GROUP directories")
-
         except Exception as e:
             print(f"Error organizing files: {e}")
 
 
-class CompleteProcessingSystem:
-    """Complete processing system"""
+# ---------------------------------------------------------------------------
+# Processing system — generates geometry once, exports to all formats
+# ---------------------------------------------------------------------------
 
+class CompleteProcessingSystem:
     def __init__(self, config):
         self.config = config
         self.plt_processor = PLTProcessor(config)
         self.gpu_ai = GPUAcceleratedAI(config)
         self.hopfield_network = GPUHopfieldNetwork(config)
         self.renderer = ScribbleRenderer(config)
+        self.generator = ScribbleGenerator(config)
+        self.svg_exporter = SVGExporter()
         self.directory_manager = DirectoryManager(config)
 
         self.processed_files = []
         self.error_files = []
+        self.sequence = None
+        self.seq_info = None
 
         print("Complete processing system initialized")
+
+    def set_sequence(self, fasta_path):
+        header, sequence = read_fasta(fasta_path)
+        name, accession = parse_fasta_header(header)
+        self.sequence = sequence
+        self.seq_info = {
+            'sequence_name': name,
+            'accession': accession,
+            'fasta_header': header,
+        }
+        alpha = detect_alphabet(sequence)
+        print(f"  Loaded sequence: {name} ({len(sequence)} {'bases' if alpha == 'dna' else 'residues'})")
+        if accession:
+            print(f"  Accession: {accession}")
 
     def get_plt_files(self, directory):
         try:
@@ -760,6 +988,7 @@ class CompleteProcessingSystem:
                 return []
 
             plt_files = list(path.glob("*.plt")) + list(path.glob("*.PLT"))
+            plt_files = sorted(set(plt_files))
             print(f"Found {len(plt_files)} PLT files")
             return plt_files
         except Exception as e:
@@ -776,7 +1005,9 @@ class CompleteProcessingSystem:
                 return False
 
             points = self.plt_processor.scale_points(raw_coords)
-            print(f"  Loaded {len(points)} points")
+            pu_count = sum(1 for _, _, z in points if z != 0)
+            pd_count = sum(1 for _, _, z in points if z == 0)
+            print(f"  Loaded {len(points)} points (PD={pd_count}, PU={pu_count})")
 
             if self.config.get('use_ai_parameters'):
                 params = self.gpu_ai.predict_parameters(points)
@@ -790,7 +1021,6 @@ class CompleteProcessingSystem:
                     params['scribble'] = (blend_factor * params['scribble'] +
                                           (1 - blend_factor) * abs(evolved_features[0]) * 8)
                     params['scribble'] = max(0.1, min(10.0, params['scribble']))
-
                     print(f"  Hopfield Enhanced: scribble={params['scribble']:.1f}")
             else:
                 params = {
@@ -801,10 +1031,30 @@ class CompleteProcessingSystem:
                     'generation_method': 'traditional'
                 }
 
+            # Override steps if specified via CLI
+            if self.config.get('steps_override'):
+                params['steps'] = self.config.get('steps_override')
+
+            # Generate scribbled geometry ONCE
+            strokes, encoding_info = self.generator.generate(
+                points, params, self.sequence, self.seq_info)
+
+            if encoding_info:
+                print(f"  Sequence encoding: {encoding_info['embedded_count']}"
+                      f"/{encoding_info['total_bases']} bases embedded"
+                      f" (capacity: {encoding_info['capacity']})")
+                if encoding_info['embedded_count'] < encoding_info['total_bases']:
+                    print("  Warning: sequence truncated — drawing has fewer"
+                          " encodable positions than the sequence length."
+                          " Increase --steps to fit more.")
+
+            if not strokes:
+                print("  No drawable strokes found")
+                return False
+
             base_name = plt_file.stem
             output_base = Path(self.config.get('directories')['output'])
 
-            # Use DirectoryManager for directory creation
             dirs = self.directory_manager.create_working_directories(
                 str(output_base), base_name, iteration)
 
@@ -812,17 +1062,20 @@ class CompleteProcessingSystem:
                 'pdf': Path(dirs.get('pdf', output_base / f"{base_name}_{iteration}" / 'PDF')),
                 'dxf': Path(dirs.get('dxf', output_base / f"{base_name}_{iteration}" / 'DXF')),
                 'png': Path(dirs.get('png', output_base / f"{base_name}_{iteration}" / 'PNG')),
+                'svg': Path(dirs.get('svg', output_base / f"{base_name}_{iteration}" / 'SVG')),
             }
 
-            figure = self.renderer.render_artwork(points, params)
+            method_suffix = params.get('generation_method', 'ai')
+            output_name = (f"{base_name}_{method_suffix}_steps{params['steps']}"
+                           f"_scribble{int(params['scribble'])}_{iteration}")
+
+            success_count = 0
+
+            # Render figure from pre-generated strokes
+            figure = self.renderer.render_from_strokes(strokes, params)
             if not figure:
                 print("  Failed to render artwork")
                 return False
-
-            method_suffix = params.get('generation_method', 'ai')
-            output_name = f"{base_name}_{method_suffix}_steps{params['steps']}_scribble{int(params['scribble'])}_{iteration}"
-
-            success_count = 0
 
             if self.config.get('generate_png'):
                 png_path = output_dirs['png'] / f"{output_name}.png"
@@ -848,17 +1101,27 @@ class CompleteProcessingSystem:
                 except Exception as e:
                     print(f"  PDF error: {e}")
 
+            plt.close(figure)
+
             if self.config.get('generate_dxf'):
                 dxf_path = output_dirs['dxf'] / f"{output_name}.dxf"
                 try:
-                    self.save_dxf(points, str(dxf_path), params)
+                    self.save_dxf(strokes, str(dxf_path))
                     self.directory_manager.register_file(str(dxf_path), 'dxf')
                     success_count += 1
                     print(f"  DXF saved: {dxf_path}")
                 except Exception as e:
                     print(f"  DXF error: {e}")
 
-            plt.close(figure)
+            if self.config.get('generate_svg'):
+                svg_path = output_dirs['svg'] / f"{output_name}.svg"
+                try:
+                    self.svg_exporter.export(strokes, str(svg_path), params, encoding_info)
+                    self.directory_manager.register_file(str(svg_path), 'svg')
+                    success_count += 1
+                    print(f"  SVG saved: {svg_path}")
+                except Exception as e:
+                    print(f"  SVG error: {e}")
 
             if success_count > 0 and self.config.get('use_hopfield_memory'):
                 features = self.gpu_ai.extract_features_gpu(points)
@@ -875,43 +1138,24 @@ class CompleteProcessingSystem:
 
         except Exception as e:
             print(f"  Processing error: {e}")
+            import traceback
+            traceback.print_exc()
             self.error_files.append(str(plt_file))
             return False
 
-    def save_dxf(self, points, output_path, params):
-        try:
-            import ezdxf
-            doc = ezdxf.new('R2010')
-            msp = doc.modelspace()
+    def save_dxf(self, strokes, output_path):
+        import ezdxf
+        doc = ezdxf.new('R2010')
+        msp = doc.modelspace()
 
-            steps = params['steps']
-            scrib_val = params['scribble']
+        for stroke in strokes:
+            for i in range(len(stroke) - 1):
+                x1, y1 = stroke[i]
+                x2, y2 = stroke[i + 1]
+                msp.add_line((x1, y1), (x2, y2))
 
-            for i in range(len(points) - 1):
-                x1, y1, z1 = points[i]
-                x2, y2, z2 = points[i + 1]
-
-                if z1 == 0:
-                    x_step = (x2 - x1) / steps
-                    y_step = (y2 - y1) / steps
-
-                    prev_x, prev_y = x1, y1
-
-                    for step in range(steps):
-                        if step < steps - 1:
-                            curr_x = prev_x + x_step + random.uniform(-scrib_val, scrib_val)
-                            curr_y = prev_y + y_step + random.uniform(-scrib_val, scrib_val)
-                        else:
-                            curr_x, curr_y = x2, y2
-
-                        msp.add_line((prev_x, prev_y), (curr_x, curr_y))
-                        prev_x, prev_y = curr_x, curr_y
-
-            doc.saveas(output_path)
-            return True
-        except Exception as e:
-            print(f"DXF save error: {e}")
-            return False
+        doc.saveas(output_path)
+        return True
 
     def process_batch(self, input_directory):
         print("BATCH PROCESSING")
@@ -924,7 +1168,8 @@ class CompleteProcessingSystem:
         total_examples = self.config.get('total_examples', 3)
         total_operations = len(plt_files) * total_examples
 
-        print(f"Processing {len(plt_files)} files x {total_examples} examples = {total_operations} operations")
+        print(f"Processing {len(plt_files)} files x {total_examples}"
+              f" examples = {total_operations} operations")
 
         if self.config.get('gpu_enabled'):
             print("Using GPU acceleration!")
@@ -937,7 +1182,6 @@ class CompleteProcessingSystem:
                     success = self.process_single_file(plt_file, iteration)
                     if success:
                         successful_operations += 1
-
                     pbar.update(1)
                     pbar.set_description(f"Success: {successful_operations}/{total_operations}")
 
@@ -953,10 +1197,8 @@ class CompleteProcessingSystem:
             'output_directory': self.config.get('directories')['output']
         }
 
-        # Organize output files into GROUP directories
         self.directory_manager.organize_output_files()
 
-        # Show directory structure after organizing
         if self.config.get('organize_groups', True):
             output_dir = self.config.get('directories')['output']
             show_directory_structure(output_dir)
@@ -974,39 +1216,44 @@ class CompleteProcessingSystem:
         print(f"Hopfield patterns learned: {summary['hopfield_patterns']}")
         print(f"GPU accelerated: {'YES' if summary['gpu_accelerated'] else 'NO'}")
         print(f"Output directory: {summary['output_directory']}")
-
         if summary['error_files'] > 0:
             print(f"\nFiles with errors: {summary['error_files']}")
-
         print("=" * 60)
 
 
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
+
 def quick_test(config, processing_system):
-    """Quick system test"""
     print("\nQUICK SYSTEM TEST")
     print("=" * 30)
 
     print(f"1. Configuration: {'OK' if config else 'FAILED'}")
     print(f"2. GPU Available: {'YES' if config.get('gpu_enabled') else 'NO'}")
-    print(f"3. Processing System: {'OK' if processing_system else 'FAILED'}")
+    print(f"3. PyTorch: {'Available' if TORCH_AVAILABLE else 'Not installed (numpy fallback)'}")
+    print(f"4. Processing System: {'OK' if processing_system else 'FAILED'}")
 
     input_dir = Path(config.get('directories')['input'])
-    print(f"4. Input Directory: {'EXISTS' if input_dir.exists() else 'MISSING'}")
+    print(f"5. Input Directory: {'EXISTS' if input_dir.exists() else 'MISSING'}")
 
     if input_dir.exists():
         plt_files = processing_system.get_plt_files(str(input_dir))
-        print(f"5. PLT Files: {len(plt_files) if plt_files else 'NONE'}")
+        print(f"6. PLT Files: {len(plt_files) if plt_files else 'NONE'}")
 
 
 def gpu_status():
-    """Check GPU status"""
+    if not TORCH_AVAILABLE:
+        print("\nGPU STATUS: PyTorch not installed")
+        print("Install with: pip install torch")
+        return
+
     if torch.cuda.is_available():
         print("\nGPU STATUS: AVAILABLE")
         print(f"   Device: {torch.cuda.get_device_name(0)}")
-        print(f"   Memory: {torch.cuda.get_device_properties(0).total_memory // 1024**3} GB")
-
+        print(f"   Memory: {torch.cuda.get_device_properties(0).total_mem // 1024**3} GB")
         allocated = torch.cuda.memory_allocated() / 1024**3
-        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        total = torch.cuda.get_device_properties(0).total_mem / 1024**3
         print(f"   Used: {allocated:.2f} GB ({allocated / total * 100:.1f}%)")
     else:
         print("\nGPU STATUS: NOT AVAILABLE")
@@ -1014,26 +1261,21 @@ def gpu_status():
 
 
 def hopfield_demo(processing_system):
-    """Quick Hopfield demonstration"""
     print("\nHOPFIELD NETWORK DEMO")
     print("Kent Benson's 1986 vision of neural network art control")
     print("=" * 50)
 
     demo_net = processing_system.hopfield_network
-
     artistic_pattern = [0.8, 0.2, 0.9, 0.1, 0.7, 0.3, 0.6, 0.4, 0.5, 0.5, 0.4, 0.6, 0.3, 0.7, 0.2]
     demo_net.store_pattern(artistic_pattern, "demo_style")
-
     partial = [0.8, 0.2, 0.0, 0.0, 0.7, 0.0, 0.6, 0.0, 0.5, 0.0, 0.4, 0.0, 0.3, 0.0, 0.2]
     recalled = demo_net.recall_pattern(partial)
-
     print(f"Partial input: {[f'{x:.1f}' for x in partial[:8]]}")
     print(f"Network recall: {[f'{x:.1f}' for x in recalled[:8]]}")
     print("\nThis shows how the network completes partial artistic patterns!")
 
 
 def show_directory_structure(base_path, max_depth=3):
-    """Show directory tree with box-drawing characters"""
     base = Path(base_path)
     if not base.exists():
         print(f"Directory not found: {base_path}")
@@ -1048,7 +1290,6 @@ def show_directory_structure(base_path, max_depth=3):
     def print_tree(path, prefix="", current_depth=0):
         if current_depth >= max_depth:
             return
-
         try:
             stat = path.stat()
             inode = (stat.st_dev, stat.st_ino)
@@ -1057,17 +1298,14 @@ def show_directory_structure(base_path, max_depth=3):
             visited_inodes.add(inode)
         except OSError:
             return
-
         try:
             items = sorted(path.iterdir())
         except PermissionError:
             return
-
         for i, item in enumerate(items):
             is_last = i == len(items) - 1
             connector = "└── " if is_last else "├── "
             print(f"{prefix}{connector}{item.name}")
-
             if item.is_dir() and current_depth + 1 < max_depth:
                 next_prefix = prefix + ("    " if is_last else "│   ")
                 print_tree(item, next_prefix, current_depth + 1)
@@ -1076,7 +1314,6 @@ def show_directory_structure(base_path, max_depth=3):
 
 
 def create_sample_plt_files(output_dir):
-    """Create 3 sample PLT files for demonstration"""
     input_dir = Path(output_dir)
     input_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1158,22 +1395,18 @@ SP0;"""
 
 
 def run_complete_demo(config, processing_system):
-    """Run end-to-end demonstration: create samples, process, show output"""
     print("\nRUNNING COMPLETE DEMONSTRATION")
     print("=" * 50)
 
-    # 1. Create sample files
     print("\n1. Creating sample PLT files...")
     input_dir = config.get('directories')['input']
     if not create_sample_plt_files(input_dir):
         print("Failed to create sample files")
         return
 
-    # 2. Hopfield demo
     print("\n2. Demonstrating Hopfield networks...")
     hopfield_demo(processing_system)
 
-    # 3. Process one sample file
     print("\n3. Processing test file...")
     plt_files = processing_system.get_plt_files(input_dir)
     if plt_files:
@@ -1182,17 +1415,14 @@ def run_complete_demo(config, processing_system):
             print("Test processing successful!")
         else:
             print("Test processing failed")
-
-        # Organize GROUP directories
         processing_system.directory_manager.organize_output_files()
 
-    # 4. Show output structure
     print("\n4. Output directory structure:")
     output_dir = config.get('directories')['output']
     show_directory_structure(output_dir)
 
     output_base = Path(output_dir)
-    for subdir in ['GROUP_PDF', 'GROUP_DXF', 'GROUP_PNG']:
+    for subdir in ['GROUP_PDF', 'GROUP_DXF', 'GROUP_PNG', 'GROUP_SVG']:
         group_dir = output_base / subdir
         if group_dir.exists():
             files = list(group_dir.glob('*'))
@@ -1202,34 +1432,53 @@ def run_complete_demo(config, processing_system):
 
     print("\nDEMO COMPLETE!")
     print(f"Output: {output_dir}")
-    print("Note: Demo output persists in the output directory. Delete manually if not needed.")
 
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description='GPU-Integrated AI-Enhanced Scribble Plotter')
-    parser.add_argument('--input', '-i', type=str, help='Input directory containing PLT files')
-    parser.add_argument('--output', '-o', type=str, help='Base output directory')
-    parser.add_argument('--examples', '-e', type=int, default=3, help='Number of examples per file')
-    parser.add_argument('--no-gpu', action='store_true', help='Disable GPU acceleration')
-    parser.add_argument('--no-ai', action='store_true', help='Disable AI parameter prediction')
-    parser.add_argument('--no-hopfield', action='store_true', help='Disable Hopfield memory')
-    parser.add_argument('--test', action='store_true', help='Run quick system test')
-    parser.add_argument('--demo', action='store_true', help='Run Hopfield demo')
-    parser.add_argument('--full-demo', action='store_true', help='Run complete end-to-end demo')
-    parser.add_argument('--create-samples', action='store_true', help='Create sample PLT files')
-    parser.add_argument('--no-groups', action='store_true', help='Disable GROUP directory organization')
-    parser.add_argument('--gpu-status', action='store_true', help='Show GPU status')
+    parser = argparse.ArgumentParser(
+        description='GPU-Integrated AI-Enhanced Scribble Plotter')
+    parser.add_argument('--input', '-i', type=str,
+                        help='Input directory containing PLT files')
+    parser.add_argument('--output', '-o', type=str,
+                        help='Base output directory')
+    parser.add_argument('--examples', '-e', type=int, default=3,
+                        help='Number of examples per file')
+    parser.add_argument('--steps', type=int, default=None,
+                        help='Override steps per segment (more steps = more encoding capacity)')
+    parser.add_argument('--sequence', type=str, default=None,
+                        help='Path to FASTA file for sequence-driven wobble')
+    parser.add_argument('--no-gpu', action='store_true',
+                        help='Disable GPU acceleration')
+    parser.add_argument('--no-ai', action='store_true',
+                        help='Disable AI parameter prediction')
+    parser.add_argument('--no-hopfield', action='store_true',
+                        help='Disable Hopfield memory')
+    parser.add_argument('--no-svg', action='store_true',
+                        help='Disable SVG output')
+    parser.add_argument('--test', action='store_true',
+                        help='Run quick system test')
+    parser.add_argument('--demo', action='store_true',
+                        help='Run Hopfield demo')
+    parser.add_argument('--full-demo', action='store_true',
+                        help='Run complete end-to-end demo')
+    parser.add_argument('--create-samples', action='store_true',
+                        help='Create sample PLT files')
+    parser.add_argument('--no-groups', action='store_true',
+                        help='Disable GROUP directory organization')
+    parser.add_argument('--gpu-status', action='store_true',
+                        help='Show GPU status')
 
     args = parser.parse_args()
 
-    # Setup system
     base_dir = args.output if args.output else None
     SYSTEM_INFO = setup_complete_system(base_dir)
 
-    # Initialize configuration
     CONFIG = CompleteConfiguration(SYSTEM_INFO)
 
-    # Apply command-line overrides
     if args.no_gpu:
         CONFIG.set('gpu_enabled', False)
         CONFIG.set('use_gpu_acceleration', False)
@@ -1239,13 +1488,15 @@ def main():
         CONFIG.set('use_hopfield_memory', False)
     if args.examples:
         CONFIG.set('total_examples', args.examples)
+    if args.no_svg:
+        CONFIG.config['generate_svg'] = False
+    if args.steps:
+        CONFIG.config['steps_override'] = args.steps
 
     CONFIG.display_status()
 
-    # Initialize processing system
     PROCESSING_SYSTEM = CompleteProcessingSystem(CONFIG)
 
-    # Handle commands
     if args.gpu_status:
         gpu_status()
         return
@@ -1270,7 +1521,9 @@ def main():
         create_sample_plt_files(input_dir)
         return
 
-    # Process files
+    if args.sequence:
+        PROCESSING_SYSTEM.set_sequence(args.sequence)
+
     if args.input:
         input_dir = args.input
     else:
@@ -1287,10 +1540,11 @@ def main():
         print("  --full-demo       Run complete end-to-end demo")
         print("  --create-samples  Create sample PLT files")
         print("  --gpu-status      Show GPU status")
+        print("  --sequence FILE   Use FASTA sequence for deterministic wobble")
+        print("  --steps N         Override steps per segment")
         print("  --help            Show all options")
         return
 
-    # Process batch
     PROCESSING_SYSTEM.process_batch(input_dir)
 
 
