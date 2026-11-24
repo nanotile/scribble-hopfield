@@ -1,3 +1,4 @@
+# Required
 matplotlib
 numpy
 pandas
@@ -7,6 +8,13 @@ ezdxf
 reportlab
 tqdm
 scikit-learn
-torch
-torchvision
-PyQt6
+
+# Optional — GPU acceleration (numpy fallback works without torch)
+# torch
+# torchvision
+
+# Optional — Desktop GUI: pip install PyQt6
+# PyQt6
+
+# Optional — Web UI: pip install gradio
+# gradio

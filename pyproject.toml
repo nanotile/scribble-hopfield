@@ -1,0 +1,5 @@
+[tool.ruff]
+exclude = [
+    "complete_gpu_integrated_ai_enhanced_scribble_plotter.py",
+    "COMPLETE_GPU_INTEGRATED_AI_ENHANCED_SCRIBBLE_PLOTTER.ipynb",
+]

@@ -21,8 +21,11 @@ from scribble_plotter_local import (
     setup_complete_system,
     CompleteConfiguration,
     CompleteProcessingSystem,
+    TORCH_AVAILABLE,
 )
-import torch
+
+if TORCH_AVAILABLE:
+    import torch
 
 
 class ProcessingWorker(QThread):
@@ -45,11 +48,11 @@ class ProcessingWorker(QThread):
     def run(self):
         try:
             config = self.processing_system.config
-            plt_files = self.processing_system.get_plt_files(self.input_dir)
+            plt_files = self.processing_system.get_input_files(self.input_dir)
 
             if not plt_files:
-                self.log.emit("No PLT files found in input directory")
-                self.finished.emit({'success': False, 'message': 'No PLT files found'})
+                self.log.emit("No input files found (PLT/DXF/DWG/DWX)")
+                self.finished.emit({'success': False, 'message': 'No input files found'})
                 return
 
             total_examples = config.get('total_examples', 3)
@@ -91,6 +94,11 @@ class ProcessingWorker(QThread):
                                 self.image_ready.emit(str(png_files[0]))
 
                     self.log.emit(f"  {'Success' if success else 'Failed'}")
+
+            # Organize output files into GROUP directories
+            self.processing_system.directory_manager.organize_output_files()
+            if config.get('organize_groups', True):
+                self.log.emit("Output files organized into GROUP directories")
 
             summary = {
                 'success': True,
@@ -234,6 +242,7 @@ class ScribblePlotterGUI(QMainWindow):
         left_column = QVBoxLayout()
         left_column.addWidget(self.create_input_settings_group())
         left_column.addWidget(self.create_ai_settings_group())
+        left_column.addWidget(self.create_sequence_group())
         left_column.addStretch()
 
         # Right column: Output settings and controls
@@ -308,13 +317,38 @@ class ScribblePlotterGUI(QMainWindow):
         # GPU Acceleration checkbox
         self.gpu_checkbox = QCheckBox("GPU Acceleration")
         gpu_available = self.config.get('gpu_enabled', False)
+        gpu_hw_available = TORCH_AVAILABLE and torch.cuda.is_available()
         self.gpu_checkbox.setChecked(gpu_available)
-        self.gpu_checkbox.setEnabled(torch.cuda.is_available())
+        self.gpu_checkbox.setEnabled(gpu_hw_available)
         self.gpu_checkbox.stateChanged.connect(self.on_gpu_changed)
 
-        if not torch.cuda.is_available():
+        if not gpu_hw_available:
             self.gpu_checkbox.setToolTip("GPU not available on this system")
         layout.addWidget(self.gpu_checkbox)
+
+        group.setLayout(layout)
+        return group
+
+    def create_sequence_group(self):
+        """Create the sequence encoding settings group"""
+        group = QGroupBox("Sequence Encoding")
+        layout = QGridLayout()
+
+        layout.addWidget(QLabel("FASTA File:"), 0, 0)
+        self.fasta_edit = QLineEdit()
+        self.fasta_edit.setPlaceholderText("Optional: path to .fasta file")
+        layout.addWidget(self.fasta_edit, 0, 1)
+
+        fasta_btn = QPushButton("Browse...")
+        fasta_btn.clicked.connect(self.select_fasta_file)
+        layout.addWidget(fasta_btn, 0, 2)
+
+        layout.addWidget(QLabel("Steps override:"), 1, 0)
+        self.steps_spinbox_seq = QSpinBox()
+        self.steps_spinbox_seq.setRange(0, 20)
+        self.steps_spinbox_seq.setValue(0)
+        self.steps_spinbox_seq.setToolTip("0 = auto (AI-predicted). Higher values = more encoding capacity.")
+        layout.addWidget(self.steps_spinbox_seq, 1, 1)
 
         group.setLayout(layout)
         return group
@@ -341,6 +375,19 @@ class ScribblePlotterGUI(QMainWindow):
         self.dxf_checkbox.setChecked(self.config.get('generate_dxf', True))
         self.dxf_checkbox.stateChanged.connect(lambda state: self.config.set('generate_dxf', state == Qt.CheckState.Checked.value))
         layout.addWidget(self.dxf_checkbox)
+
+        # SVG checkbox
+        self.svg_checkbox = QCheckBox("Generate SVG")
+        self.svg_checkbox.setChecked(self.config.get('generate_svg', True))
+        self.svg_checkbox.stateChanged.connect(lambda state: self.config.set('generate_svg', state == Qt.CheckState.Checked.value))
+        layout.addWidget(self.svg_checkbox)
+
+        # GROUP organization checkbox
+        self.groups_checkbox = QCheckBox("Organize GROUP directories")
+        self.groups_checkbox.setChecked(self.config.get('organize_groups', True))
+        self.groups_checkbox.stateChanged.connect(lambda state: self.config.set('organize_groups', state == Qt.CheckState.Checked.value))
+        self.groups_checkbox.setToolTip("Copy output files into GROUP_PDF, GROUP_DXF, GROUP_PNG directories")
+        layout.addWidget(self.groups_checkbox)
 
         group.setLayout(layout)
         return group
@@ -451,9 +498,10 @@ class ScribblePlotterGUI(QMainWindow):
         self.setStatusBar(self.statusbar)
 
         # GPU status indicator
-        gpu_status = "GPU: " + ("Available" if torch.cuda.is_available() else "Not Available")
-        if torch.cuda.is_available():
-            gpu_status += f" ({torch.cuda.get_device_name(0)})"
+        if TORCH_AVAILABLE and torch.cuda.is_available():
+            gpu_status = f"GPU: Available ({torch.cuda.get_device_name(0)})"
+        else:
+            gpu_status = "GPU: Not Available"
 
         self.gpu_label = QLabel(gpu_status)
         self.statusbar.addPermanentWidget(self.gpu_label)
@@ -481,9 +529,13 @@ class ScribblePlotterGUI(QMainWindow):
             self.input_dir_edit.setText(directory)
             self.log(f"Input directory set to: {directory}")
 
-            # Count PLT files
-            plt_files = list(Path(directory).glob("*.plt")) + list(Path(directory).glob("*.PLT"))
-            self.log(f"Found {len(plt_files)} PLT files")
+            exts = ['plt', 'dxf', 'dwg', 'dwx']
+            input_files = []
+            for ext in exts:
+                input_files.extend(Path(directory).glob(f"*.{ext}"))
+                input_files.extend(Path(directory).glob(f"*.{ext.upper()}"))
+            input_files = sorted(set(input_files))
+            self.log(f"Found {len(input_files)} input files (PLT/DXF/DWG/DWX)")
 
     def open_output_dir(self):
         """Open the output directory in file manager"""
@@ -515,18 +567,55 @@ class ScribblePlotterGUI(QMainWindow):
         self.config.set('gpu_enabled', enabled)
         self.config.set('use_gpu_acceleration', enabled)
 
-    def test_single_file(self):
-        """Process a single PLT file"""
-        plt_files = list(Path(self.input_dir).glob("*.plt")) + list(Path(self.input_dir).glob("*.PLT"))
+    def select_fasta_file(self):
+        """Open file dialog for FASTA file selection"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select FASTA File",
+            str(Path.home()),
+            "FASTA Files (*.fasta *.fa *.fna *.faa);;All Files (*)"
+        )
+        if file_path:
+            self.fasta_edit.setText(file_path)
+            self.log(f"FASTA file selected: {file_path}")
 
-        if not plt_files:
-            QMessageBox.warning(self, "No Files", "No PLT files found in the input directory.")
+    def _apply_sequence_settings(self):
+        """Apply sequence and steps settings to the processing system."""
+        fasta_path = self.fasta_edit.text().strip()
+        steps = self.steps_spinbox_seq.value()
+
+        if fasta_path and Path(fasta_path).is_file():
+            self.processing_system.set_sequence(fasta_path)
+        else:
+            self.processing_system.sequence = None
+            self.processing_system.seq_info = None
+
+        if steps > 0:
+            self.config.config['steps_override'] = steps
+        else:
+            self.config.config.pop('steps_override', None)
+
+    def _get_input_files(self):
+        exts = ['plt', 'dxf', 'dwg', 'dwx']
+        found = []
+        for ext in exts:
+            found.extend(Path(self.input_dir).glob(f"*.{ext}"))
+            found.extend(Path(self.input_dir).glob(f"*.{ext.upper()}"))
+        return sorted(set(found))
+
+    def test_single_file(self):
+        """Process a single input file"""
+        input_files = self._get_input_files()
+
+        if not input_files:
+            QMessageBox.warning(self, "No Files", "No input files found (PLT/DXF/DWG/DWX).")
             return
 
+        self._apply_sequence_settings()
         self.set_processing_state(True)
         self.log("Starting single file test...")
 
-        self.single_file_worker = SingleFileWorker(self.processing_system, plt_files[0])
+        self.single_file_worker = SingleFileWorker(self.processing_system, input_files[0])
         self.single_file_worker.log.connect(self.log)
         self.single_file_worker.image_ready.connect(self.update_preview)
         self.single_file_worker.finished.connect(self.on_single_file_finished)
@@ -541,23 +630,24 @@ class ScribblePlotterGUI(QMainWindow):
             self.statusbar.showMessage("Single file processing failed")
 
     def process_all_files(self):
-        """Process all PLT files in the input directory"""
-        plt_files = list(Path(self.input_dir).glob("*.plt")) + list(Path(self.input_dir).glob("*.PLT"))
+        """Process all input files in the directory"""
+        input_files = self._get_input_files()
 
-        if not plt_files:
-            QMessageBox.warning(self, "No Files", "No PLT files found in the input directory.")
+        if not input_files:
+            QMessageBox.warning(self, "No Files", "No input files found (PLT/DXF/DWG/DWX).")
             return
 
         total_examples = self.config.get('total_examples', 3)
-        total_operations = len(plt_files) * total_examples
+        total_operations = len(input_files) * total_examples
 
+        self._apply_sequence_settings()
         self.set_processing_state(True)
         self.progress_bar.setRange(0, total_operations)
         self.progress_bar.setValue(0)
         self.progress_bar.show()
         self.cancel_btn.show()
 
-        self.log(f"Starting batch processing: {len(plt_files)} files x {total_examples} examples")
+        self.log(f"Starting batch processing: {len(input_files)} files x {total_examples} examples")
 
         self.processing_worker = ProcessingWorker(self.processing_system, self.input_dir)
         self.processing_worker.progress.connect(self.update_progress)
@@ -641,20 +731,24 @@ class ScribblePlotterGUI(QMainWindow):
         self.examples_spinbox.setEnabled(not processing)
         self.ai_params_checkbox.setEnabled(not processing)
         self.hopfield_checkbox.setEnabled(not processing)
-        self.gpu_checkbox.setEnabled(not processing and torch.cuda.is_available())
+        self.gpu_checkbox.setEnabled(not processing and TORCH_AVAILABLE and torch.cuda.is_available())
         self.png_checkbox.setEnabled(not processing)
         self.pdf_checkbox.setEnabled(not processing)
         self.dxf_checkbox.setEnabled(not processing)
+        self.svg_checkbox.setEnabled(not processing)
+        self.fasta_edit.setEnabled(not processing)
+        self.steps_spinbox_seq.setEnabled(not processing)
 
     def show_about(self):
         """Show about dialog"""
         QMessageBox.about(
             self,
             "About Scribble Plotter",
-            "GPU-Integrated AI-Enhanced Scribble Plotter v3.0\n\n"
+            "GPU-Integrated AI-Enhanced Scribble Plotter v4.0\n\n"
             "A system that converts PLT vector graphics into artistic\n"
             "'scribble' renderings using GPU-accelerated AI and\n"
-            "Hopfield neural networks.\n\n"
+            "Hopfield neural networks, with optional biological\n"
+            "sequence encoding.\n\n"
             "Honoring Kent Benson's 1983-1986 Hopfield Network Research"
         )
 

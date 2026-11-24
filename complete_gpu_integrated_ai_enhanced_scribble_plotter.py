@@ -50,6 +50,7 @@ import ipywidgets as widgets
 from IPython.display import display, clear_output, HTML
 from tqdm import tqdm
 from datetime import datetime
+import shutil
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -160,6 +161,7 @@ class CompleteConfiguration:
             'generate_pdf': True,
             'generate_dxf': True,
             'generate_png': True,
+            'organize_groups': True,
             'output_dpi': 300,
 
             # Graphics Settings
@@ -765,7 +767,226 @@ class ScribbleRenderer:
 
         except Exception as e:
             print(f"❌ Rendering error: {e}")
+            # Close any partially-created figure to prevent memory leak
+            plt.close('all')
             return None
+
+# =====================================
+# CELL 7B: DIRECTORY MANAGER
+# =====================================
+
+class DirectoryManager:
+    """Manages per-file working directories and GROUP aggregate directories"""
+
+    GROUP_DIRS = ['GROUP_PDF', 'GROUP_DXF', 'GROUP_PNG', 'GROUP_TIFF', 'GROUP_TRANSFORM']
+
+    def __init__(self, config):
+        self.config = config
+        self.processed_files = []
+        self.file_registry = {}
+        print("📁 Directory manager initialized")
+
+    def create_working_directories(self, base_dir, file_base_name, file_index):
+        """Create per-file working directories and GROUP aggregate directories"""
+        try:
+            working_dir = Path(base_dir) / f"{file_base_name}_{file_index}"
+
+            directories = {
+                'pdf': working_dir / 'PDF',
+                'dxf': working_dir / 'DXF',
+                'png': working_dir / 'PNG',
+                'tmp': working_dir / 'TMP',
+            }
+
+            # GROUP directories at the base output level
+            for gdir in self.GROUP_DIRS:
+                directories[gdir.lower()] = Path(base_dir) / gdir
+
+            for name, path in directories.items():
+                path.mkdir(parents=True, exist_ok=True)
+
+            return {name: str(path) for name, path in directories.items()}
+
+        except Exception as e:
+            print(f"❌ Directory creation error: {e}")
+            return {}
+
+    def register_file(self, file_path, file_type):
+        """Register a processed output file for later GROUP organization"""
+        self.processed_files.append(file_path)
+        self.file_registry[file_path] = {
+            'type': file_type,
+            'timestamp': datetime.now()
+        }
+
+    def organize_output_files(self):
+        """Copy all registered output files to GROUP directories (non-destructive)"""
+        if not self.config.get('organize_groups', True):
+            return
+
+        try:
+            base_output = Path(self.config.get('directories')['output'])
+            copied_count = 0
+
+            for file_path in self.processed_files:
+                source = Path(file_path)
+                if not source.exists():
+                    continue
+
+                ext = source.suffix.lower()
+                group_map = {
+                    '.pdf': 'GROUP_PDF',
+                    '.dxf': 'GROUP_DXF',
+                    '.png': 'GROUP_PNG',
+                    '.tiff': 'GROUP_TIFF',
+                    '.tif': 'GROUP_TIFF',
+                }
+
+                group_name = group_map.get(ext)
+                if not group_name:
+                    continue
+
+                group_dir = base_output / group_name
+                group_dir.mkdir(exist_ok=True)
+
+                # Prefix with parent dir name to prevent filename collisions
+                parent_name = source.parent.parent.name
+                dest_name = f"{parent_name}_{source.name}"
+                destination = group_dir / dest_name
+
+                shutil.copy2(str(source), str(destination))
+                copied_count += 1
+
+            print(f"📦 Organized {copied_count} files into GROUP directories")
+
+        except Exception as e:
+            print(f"⚠️ Error organizing files: {e}")
+
+
+def show_directory_structure(base_path, max_depth=3):
+    """Show directory tree with box-drawing characters"""
+    base = Path(base_path)
+    if not base.exists():
+        print(f"Directory not found: {base_path}")
+        return
+
+    print(f"\n📁 DIRECTORY STRUCTURE")
+    print("=" * 30)
+    print(f"{base.name}/")
+
+    visited_inodes = set()
+
+    def print_tree(path, prefix="", current_depth=0):
+        if current_depth >= max_depth:
+            return
+
+        try:
+            stat = path.stat()
+            inode = (stat.st_dev, stat.st_ino)
+            if inode in visited_inodes:
+                return
+            visited_inodes.add(inode)
+        except OSError:
+            return
+
+        try:
+            items = sorted(path.iterdir())
+        except PermissionError:
+            return
+
+        for i, item in enumerate(items):
+            is_last = i == len(items) - 1
+            connector = "└── " if is_last else "├── "
+            print(f"{prefix}{connector}{item.name}")
+
+            if item.is_dir() and current_depth + 1 < max_depth:
+                next_prefix = prefix + ("    " if is_last else "│   ")
+                print_tree(item, next_prefix, current_depth + 1)
+
+    print_tree(base)
+
+
+def create_sample_plt_files(output_dir):
+    """Create 3 sample PLT files for demonstration"""
+    input_dir = Path(output_dir)
+    input_dir.mkdir(parents=True, exist_ok=True)
+
+    plt_content_1 = """IN;
+SP1;
+PA0,0;
+PD;
+PA100,0;
+PA100,100;
+PA0,100;
+PA0,0;
+PU;
+SP0;"""
+
+    plt_content_2 = """IN;
+SP1;
+PA50,0;
+PD;
+PA70,14;
+PA85,35;
+PA92,57;
+PA85,79;
+PA70,100;
+PA50,107;
+PA30,100;
+PA15,79;
+PA8,57;
+PA15,35;
+PA30,14;
+PA50,0;
+PU;
+SP0;"""
+
+    plt_content_3 = """IN;
+SP1;
+PA20,20;
+PD;
+PA80,20;
+PA80,80;
+PA20,80;
+PA20,20;
+PU;
+PA30,30;
+PD;
+PA70,30;
+PA70,70;
+PA30,70;
+PA30,30;
+PU;
+PA40,40;
+PD;
+PA60,60;
+PU;
+PA60,40;
+PD;
+PA40,60;
+PU;
+SP0;"""
+
+    sample_files = [
+        ('sample_rectangle.plt', plt_content_1),
+        ('sample_circle.plt', plt_content_2),
+        ('sample_complex.plt', plt_content_3),
+    ]
+
+    created_count = 0
+    for filename, content in sample_files:
+        file_path = input_dir / filename
+        try:
+            with open(file_path, 'w') as f:
+                f.write(content)
+            print(f"  ✅ Created: {filename}")
+            created_count += 1
+        except Exception as e:
+            print(f"  ❌ Failed to create {filename}: {e}")
+
+    print(f"🎉 Created {created_count} sample PLT files in {input_dir}")
+    return created_count > 0
+
 
 # =====================================
 # CELL 8: COMPLETE PROCESSING SYSTEM
@@ -780,6 +1001,7 @@ class CompleteProcessingSystem:
         self.gpu_ai = GPUAcceleratedAI(config)
         self.hopfield_network = GPUHopfieldNetwork(config)
         self.renderer = ScribbleRenderer(config)
+        self.directory_manager = DirectoryManager(config)
 
         self.processed_files = []
         self.error_files = []
@@ -843,19 +1065,18 @@ class CompleteProcessingSystem:
                     'generation_method': 'traditional'
                 }
 
-            # 4. Create output directories
+            # 4. Create output directories via DirectoryManager
             base_name = plt_file.stem
             output_base = Path(self.config.get('directories')['output'])
-            work_dir = output_base / f"{base_name}_{iteration}"
+
+            dirs = self.directory_manager.create_working_directories(
+                str(output_base), base_name, iteration)
 
             output_dirs = {
-                'pdf': work_dir / 'PDF',
-                'dxf': work_dir / 'DXF',
-                'png': work_dir / 'PNG'
+                'pdf': Path(dirs.get('pdf', output_base / f"{base_name}_{iteration}" / 'PDF')),
+                'dxf': Path(dirs.get('dxf', output_base / f"{base_name}_{iteration}" / 'DXF')),
+                'png': Path(dirs.get('png', output_base / f"{base_name}_{iteration}" / 'PNG')),
             }
-
-            for dir_path in output_dirs.values():
-                dir_path.mkdir(parents=True, exist_ok=True)
 
             # 5. Render artwork
             figure = self.renderer.render_artwork(points, params)
@@ -876,6 +1097,7 @@ class CompleteProcessingSystem:
                     figure.savefig(str(png_path), format='png',
                                  dpi=self.config.get('output_dpi', 150),
                                  bbox_inches='tight', facecolor='white')
+                    self.directory_manager.register_file(str(png_path), 'png')
                     success_count += 1
                     print(f"  ✅ PNG saved")
                 except Exception as e:
@@ -888,6 +1110,7 @@ class CompleteProcessingSystem:
                     figure.savefig(str(pdf_path), format='pdf',
                                  dpi=self.config.get('output_dpi', 300),
                                  bbox_inches='tight', facecolor='white')
+                    self.directory_manager.register_file(str(pdf_path), 'pdf')
                     success_count += 1
                     print(f"  ✅ PDF saved")
                 except Exception as e:
@@ -898,6 +1121,7 @@ class CompleteProcessingSystem:
                 dxf_path = output_dirs['dxf'] / f"{output_name}.dxf"
                 try:
                     self.save_dxf(points, str(dxf_path), params)
+                    self.directory_manager.register_file(str(dxf_path), 'dxf')
                     success_count += 1
                     print(f"  ✅ DXF saved")
                 except Exception as e:
@@ -1005,6 +1229,14 @@ class CompleteProcessingSystem:
             'output_directory': self.config.get('directories')['output']
         }
 
+        # Organize output files into GROUP directories
+        self.directory_manager.organize_output_files()
+
+        # Show directory structure after organizing
+        if self.config.get('organize_groups', True):
+            output_dir = self.config.get('directories')['output']
+            show_directory_structure(output_dir)
+
         self.print_summary(summary)
         return summary
 
@@ -1088,6 +1320,11 @@ class CompleteInterface:
             description='🖼️ Generate PNG'
         )
 
+        self.groups_widget = widgets.Checkbox(
+            value=self.config.get('organize_groups', True),
+            description='📦 GROUP Directories'
+        )
+
         # Control buttons
         self.upload_button = widgets.Button(
             description='📤 Upload PLT Files',
@@ -1169,7 +1406,8 @@ class CompleteInterface:
             widgets.HTML("<h3>📤 Output Settings</h3>"),
             self.pdf_widget,
             self.dxf_widget,
-            self.png_widget
+            self.png_widget,
+            self.groups_widget
         ])
 
         # Control panel
@@ -1302,7 +1540,8 @@ class CompleteInterface:
             'use_gpu_acceleration': self.use_gpu_widget.value,
             'generate_pdf': self.pdf_widget.value,
             'generate_dxf': self.dxf_widget.value,
-            'generate_png': self.png_widget.value
+            'generate_png': self.png_widget.value,
+            'organize_groups': self.groups_widget.value
         }
 
         for key, value in updates.items():
@@ -1379,6 +1618,53 @@ def hopfield_demo():
     print(f"🧠 Network recall: {[f'{x:.1f}' for x in recalled[:8]]}")
     print(f"\n💡 This shows how the network completes partial artistic patterns!")
 
+def run_complete_demo():
+    """Run end-to-end demonstration: create samples, process, show output"""
+    print("\n🚀 RUNNING COMPLETE DEMONSTRATION")
+    print("=" * 50)
+
+    # 1. Create sample files
+    print("\n1️⃣ Creating sample PLT files...")
+    input_dir = CONFIG.get('directories')['input']
+    if not create_sample_plt_files(input_dir):
+        print("❌ Failed to create sample files")
+        return
+
+    # 2. Hopfield demo
+    print("\n2️⃣ Demonstrating Hopfield networks...")
+    hopfield_demo()
+
+    # 3. Process one sample file
+    print("\n3️⃣ Processing test file...")
+    plt_files = PROCESSING_SYSTEM.get_plt_files(input_dir)
+    if plt_files:
+        success = PROCESSING_SYSTEM.process_single_file(plt_files[0], 0)
+        if success:
+            print("✅ Test processing successful!")
+        else:
+            print("❌ Test processing failed")
+
+        # Organize GROUP directories
+        PROCESSING_SYSTEM.directory_manager.organize_output_files()
+
+    # 4. Show output structure
+    print("\n4️⃣ Output directory structure:")
+    output_dir = CONFIG.get('directories')['output']
+    show_directory_structure(output_dir)
+
+    output_base = Path(output_dir)
+    for subdir in ['GROUP_PDF', 'GROUP_DXF', 'GROUP_PNG']:
+        group_dir = output_base / subdir
+        if group_dir.exists():
+            files = list(group_dir.glob('*'))
+            print(f"  📁 {subdir}: {len(files)} files")
+        else:
+            print(f"  📁 {subdir}: Not created yet")
+
+    print("\n🎯 DEMO COMPLETE!")
+    print(f"📁 Output: {output_dir}")
+    print("Note: Demo output persists in the output directory. Delete manually if not needed.")
+
 # =====================================
 # CELL 12: DISPLAY COMPLETE INTERFACE
 # =====================================
@@ -1398,6 +1684,9 @@ print("\n💡 AVAILABLE FUNCTIONS:")
 print("🧪 quick_test() - Quick system test")
 print("🚀 gpu_status() - Check GPU status")
 print("🧠 hopfield_demo() - Quick Hopfield demonstration")
+print("🎯 run_complete_demo() - Full end-to-end demo with sample files")
+print("📁 create_sample_plt_files(dir) - Create sample PLT files")
+print("🌳 show_directory_structure(dir) - Show directory tree")
 
 print(f"""
 🎯 COMPLETE SYSTEM FEATURES:
