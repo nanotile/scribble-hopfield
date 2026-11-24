@@ -21,8 +21,11 @@ from scribble_plotter_local import (
     setup_complete_system,
     CompleteConfiguration,
     CompleteProcessingSystem,
+    TORCH_AVAILABLE,
 )
-import torch
+
+if TORCH_AVAILABLE:
+    import torch
 
 
 class ProcessingWorker(QThread):
@@ -239,6 +242,7 @@ class ScribblePlotterGUI(QMainWindow):
         left_column = QVBoxLayout()
         left_column.addWidget(self.create_input_settings_group())
         left_column.addWidget(self.create_ai_settings_group())
+        left_column.addWidget(self.create_sequence_group())
         left_column.addStretch()
 
         # Right column: Output settings and controls
@@ -313,13 +317,38 @@ class ScribblePlotterGUI(QMainWindow):
         # GPU Acceleration checkbox
         self.gpu_checkbox = QCheckBox("GPU Acceleration")
         gpu_available = self.config.get('gpu_enabled', False)
+        gpu_hw_available = TORCH_AVAILABLE and torch.cuda.is_available()
         self.gpu_checkbox.setChecked(gpu_available)
-        self.gpu_checkbox.setEnabled(torch.cuda.is_available())
+        self.gpu_checkbox.setEnabled(gpu_hw_available)
         self.gpu_checkbox.stateChanged.connect(self.on_gpu_changed)
 
-        if not torch.cuda.is_available():
+        if not gpu_hw_available:
             self.gpu_checkbox.setToolTip("GPU not available on this system")
         layout.addWidget(self.gpu_checkbox)
+
+        group.setLayout(layout)
+        return group
+
+    def create_sequence_group(self):
+        """Create the sequence encoding settings group"""
+        group = QGroupBox("Sequence Encoding")
+        layout = QGridLayout()
+
+        layout.addWidget(QLabel("FASTA File:"), 0, 0)
+        self.fasta_edit = QLineEdit()
+        self.fasta_edit.setPlaceholderText("Optional: path to .fasta file")
+        layout.addWidget(self.fasta_edit, 0, 1)
+
+        fasta_btn = QPushButton("Browse...")
+        fasta_btn.clicked.connect(self.select_fasta_file)
+        layout.addWidget(fasta_btn, 0, 2)
+
+        layout.addWidget(QLabel("Steps override:"), 1, 0)
+        self.steps_spinbox_seq = QSpinBox()
+        self.steps_spinbox_seq.setRange(0, 20)
+        self.steps_spinbox_seq.setValue(0)
+        self.steps_spinbox_seq.setToolTip("0 = auto (AI-predicted). Higher values = more encoding capacity.")
+        layout.addWidget(self.steps_spinbox_seq, 1, 1)
 
         group.setLayout(layout)
         return group
@@ -346,6 +375,12 @@ class ScribblePlotterGUI(QMainWindow):
         self.dxf_checkbox.setChecked(self.config.get('generate_dxf', True))
         self.dxf_checkbox.stateChanged.connect(lambda state: self.config.set('generate_dxf', state == Qt.CheckState.Checked.value))
         layout.addWidget(self.dxf_checkbox)
+
+        # SVG checkbox
+        self.svg_checkbox = QCheckBox("Generate SVG")
+        self.svg_checkbox.setChecked(self.config.get('generate_svg', True))
+        self.svg_checkbox.stateChanged.connect(lambda state: self.config.set('generate_svg', state == Qt.CheckState.Checked.value))
+        layout.addWidget(self.svg_checkbox)
 
         # GROUP organization checkbox
         self.groups_checkbox = QCheckBox("Organize GROUP directories")
@@ -463,9 +498,10 @@ class ScribblePlotterGUI(QMainWindow):
         self.setStatusBar(self.statusbar)
 
         # GPU status indicator
-        gpu_status = "GPU: " + ("Available" if torch.cuda.is_available() else "Not Available")
-        if torch.cuda.is_available():
-            gpu_status += f" ({torch.cuda.get_device_name(0)})"
+        if TORCH_AVAILABLE and torch.cuda.is_available():
+            gpu_status = f"GPU: Available ({torch.cuda.get_device_name(0)})"
+        else:
+            gpu_status = "GPU: Not Available"
 
         self.gpu_label = QLabel(gpu_status)
         self.statusbar.addPermanentWidget(self.gpu_label)
@@ -527,6 +563,34 @@ class ScribblePlotterGUI(QMainWindow):
         self.config.set('gpu_enabled', enabled)
         self.config.set('use_gpu_acceleration', enabled)
 
+    def select_fasta_file(self):
+        """Open file dialog for FASTA file selection"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select FASTA File",
+            str(Path.home()),
+            "FASTA Files (*.fasta *.fa *.fna *.faa);;All Files (*)"
+        )
+        if file_path:
+            self.fasta_edit.setText(file_path)
+            self.log(f"FASTA file selected: {file_path}")
+
+    def _apply_sequence_settings(self):
+        """Apply sequence and steps settings to the processing system."""
+        fasta_path = self.fasta_edit.text().strip()
+        steps = self.steps_spinbox_seq.value()
+
+        if fasta_path and Path(fasta_path).is_file():
+            self.processing_system.set_sequence(fasta_path)
+        else:
+            self.processing_system.sequence = None
+            self.processing_system.seq_info = None
+
+        if steps > 0:
+            self.config.config['steps_override'] = steps
+        else:
+            self.config.config.pop('steps_override', None)
+
     def test_single_file(self):
         """Process a single PLT file"""
         plt_files = list(Path(self.input_dir).glob("*.plt")) + list(Path(self.input_dir).glob("*.PLT"))
@@ -535,6 +599,7 @@ class ScribblePlotterGUI(QMainWindow):
             QMessageBox.warning(self, "No Files", "No PLT files found in the input directory.")
             return
 
+        self._apply_sequence_settings()
         self.set_processing_state(True)
         self.log("Starting single file test...")
 
@@ -563,6 +628,7 @@ class ScribblePlotterGUI(QMainWindow):
         total_examples = self.config.get('total_examples', 3)
         total_operations = len(plt_files) * total_examples
 
+        self._apply_sequence_settings()
         self.set_processing_state(True)
         self.progress_bar.setRange(0, total_operations)
         self.progress_bar.setValue(0)
@@ -653,20 +719,24 @@ class ScribblePlotterGUI(QMainWindow):
         self.examples_spinbox.setEnabled(not processing)
         self.ai_params_checkbox.setEnabled(not processing)
         self.hopfield_checkbox.setEnabled(not processing)
-        self.gpu_checkbox.setEnabled(not processing and torch.cuda.is_available())
+        self.gpu_checkbox.setEnabled(not processing and TORCH_AVAILABLE and torch.cuda.is_available())
         self.png_checkbox.setEnabled(not processing)
         self.pdf_checkbox.setEnabled(not processing)
         self.dxf_checkbox.setEnabled(not processing)
+        self.svg_checkbox.setEnabled(not processing)
+        self.fasta_edit.setEnabled(not processing)
+        self.steps_spinbox_seq.setEnabled(not processing)
 
     def show_about(self):
         """Show about dialog"""
         QMessageBox.about(
             self,
             "About Scribble Plotter",
-            "GPU-Integrated AI-Enhanced Scribble Plotter v3.0\n\n"
+            "GPU-Integrated AI-Enhanced Scribble Plotter v4.0\n\n"
             "A system that converts PLT vector graphics into artistic\n"
             "'scribble' renderings using GPU-accelerated AI and\n"
-            "Hopfield neural networks.\n\n"
+            "Hopfield neural networks, with optional biological\n"
+            "sequence encoding.\n\n"
             "Honoring Kent Benson's 1983-1986 Hopfield Network Research"
         )
 

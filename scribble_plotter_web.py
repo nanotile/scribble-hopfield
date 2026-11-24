@@ -2,8 +2,8 @@
 """
 GPU-Integrated AI-Enhanced Scribble Plotter - Gradio Web Interface
 Module: scribble_plotter_web.py
-Version: 3.0.0
-Iteration: v11
+Version: 4.0.0
+Iteration: v12
 Developer: Kent Benson
 UV Environment: ./venv/bin/python scribble_plotter_web.py
 
@@ -89,6 +89,7 @@ def _filter_log(raw: str) -> str:
         # Skip noisy per-file detail
         if stripped.startswith(("Loaded ", "AI Parameters:", "Hopfield Enhanced:",
                                 "PNG saved:", "PDF saved:", "DXF saved:",
+                                "SVG saved:", "Sequence encoding:", "Accession:",
                                 "Generated ", "Stored pattern", "Processing:",
                                 "Created:", "Memory full")):
             continue
@@ -108,7 +109,10 @@ def process_uploaded_files(
     gen_png: bool,
     gen_pdf: bool,
     gen_dxf: bool,
+    gen_svg: bool,
     organize_groups: bool,
+    sequence_file,
+    steps_override: int,
 ):
     """Process uploaded PLT files and return gallery images + zip + log."""
     if not files:
@@ -140,7 +144,11 @@ def process_uploaded_files(
     orig_png = CONFIG.get('generate_png')
     orig_pdf = CONFIG.get('generate_pdf')
     orig_dxf = CONFIG.get('generate_dxf')
+    orig_svg = CONFIG.get('generate_svg')
     orig_groups = CONFIG.get('organize_groups')
+    orig_steps = CONFIG.config.get('steps_override')
+    orig_seq = PROCESSING_SYSTEM.sequence
+    orig_seq_info = PROCESSING_SYSTEM.seq_info
 
     CONFIG.config['directories']['output'] = str(session_output)
     CONFIG.config['use_ai_parameters'] = use_ai
@@ -148,7 +156,19 @@ def process_uploaded_files(
     CONFIG.config['generate_png'] = gen_png
     CONFIG.config['generate_pdf'] = gen_pdf
     CONFIG.config['generate_dxf'] = gen_dxf
+    CONFIG.config['generate_svg'] = gen_svg
     CONFIG.config['organize_groups'] = organize_groups
+
+    if int(steps_override) > 0:
+        CONFIG.config['steps_override'] = int(steps_override)
+    else:
+        CONFIG.config.pop('steps_override', None)
+
+    if sequence_file:
+        PROCESSING_SYSTEM.set_sequence(str(sequence_file))
+    else:
+        PROCESSING_SYSTEM.sequence = None
+        PROCESSING_SYSTEM.seq_info = None
 
     # Reset processing state
     PROCESSING_SYSTEM.processed_files = []
@@ -184,7 +204,14 @@ def process_uploaded_files(
         CONFIG.config['generate_png'] = orig_png
         CONFIG.config['generate_pdf'] = orig_pdf
         CONFIG.config['generate_dxf'] = orig_dxf
+        CONFIG.config['generate_svg'] = orig_svg
         CONFIG.config['organize_groups'] = orig_groups
+        if orig_steps is not None:
+            CONFIG.config['steps_override'] = orig_steps
+        else:
+            CONFIG.config.pop('steps_override', None)
+        PROCESSING_SYSTEM.sequence = orig_seq
+        PROCESSING_SYSTEM.seq_info = orig_seq_info
 
     elapsed = time.time() - start_time
 
@@ -193,6 +220,7 @@ def process_uploaded_files(
     gallery_paths = [str(p) for p in gallery_images]
     pdf_count = len(list(session_output.rglob("*.pdf")))
     dxf_count = len(list(session_output.rglob("*.dxf")))
+    svg_count = len(list(session_output.rglob("*.svg")))
 
     # Build zip of all outputs
     zip_path = None
@@ -210,7 +238,7 @@ def process_uploaded_files(
     summary_lines = [
         f"Processed {len(plt_paths)} file(s) x {examples} variation(s)  "
         f"({successful}/{total_ops} succeeded, {elapsed:.1f}s)",
-        f"Output: {len(gallery_paths)} PNG, {pdf_count} PDF, {dxf_count} DXF",
+        f"Output: {len(gallery_paths)} PNG, {pdf_count} PDF, {dxf_count} DXF, {svg_count} SVG",
     ]
     if PROCESSING_SYSTEM.error_files:
         summary_lines.append(
@@ -293,7 +321,19 @@ def build_ui() -> gr.Blocks:
                         gen_png_cb = gr.Checkbox(value=True, label="PNG")
                         gen_pdf_cb = gr.Checkbox(value=True, label="PDF")
                         gen_dxf_cb = gr.Checkbox(value=True, label="DXF")
+                        gen_svg_cb = gr.Checkbox(value=True, label="SVG")
                         organize_cb = gr.Checkbox(value=True, label="GROUP directories")
+                    with gr.Accordion("Sequence Encoding", open=False):
+                        sequence_input = gr.File(
+                            label="FASTA File (optional)",
+                            file_count="single",
+                            file_types=[".fasta", ".fa", ".fna", ".faa"],
+                            type="filepath",
+                        )
+                        steps_slider = gr.Slider(
+                            minimum=0, maximum=20, value=0, step=1,
+                            label="Steps override (0 = auto)",
+                        )
                     process_btn = gr.Button("Process", variant="primary")
 
                 with gr.Column(scale=2):
@@ -320,7 +360,10 @@ def build_ui() -> gr.Blocks:
                     gen_png_cb,
                     gen_pdf_cb,
                     gen_dxf_cb,
+                    gen_svg_cb,
                     organize_cb,
+                    sequence_input,
+                    steps_slider,
                 ],
                 outputs=[gallery, zip_download, log_box],
             )
