@@ -2,8 +2,8 @@
 """
 GPU-Integrated AI-Enhanced Scribble Plotter - Local Version
 Module: scribble_plotter_local.py
-Version: 4.0.0
-Iteration: v1
+Version: 4.1.0
+Iteration: v2
 Developer: Kent Benson
 UV Environment: pip install -r requirements.txt
 """
@@ -31,6 +31,12 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
+
+try:
+    from scipy.interpolate import CubicSpline
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
 
 warnings.filterwarnings('ignore')
 
@@ -163,7 +169,7 @@ class CompleteConfiguration:
     })
     SESSION_ONLY_KEYS = frozenset({
         'steps_override', 'color_override', 'stroke_weight_override',
-        'scribble_override', 'seed',
+        'scribble_override', 'seed', 'smooth_strokes',
     })
 
     def __init__(self, system_info):
@@ -603,16 +609,34 @@ class GPUAcceleratedAI:
     def _cpu_feature_calculation(self, coords):
         features = [0.5] * 15
 
-        if len(coords) > 1:
+        if len(coords) > 2:
+            diffs = np.diff(coords, axis=0)
+            angles = np.arctan2(diffs[:, 1], diffs[:, 0])
+            angle_changes = np.abs(np.diff(angles))
+            features[0] = float(np.mean(angle_changes) / math.pi)
+            distances = np.sqrt(np.sum(diffs**2, axis=1))
+            features[1] = float(np.sum(distances))
+        elif len(coords) > 1:
             diffs = np.diff(coords, axis=0)
             distances = np.sqrt(np.sum(diffs**2, axis=1))
-            features[1] = np.sum(distances)
+            features[1] = float(np.sum(distances))
 
+        if len(coords) > 1:
             min_coords = np.min(coords, axis=0)
             max_coords = np.max(coords, axis=0)
-            features[2] = max_coords[0] - min_coords[0]
-            features[3] = max_coords[1] - min_coords[1]
+            features[2] = float(max_coords[0] - min_coords[0])
+            features[3] = float(max_coords[1] - min_coords[1])
             features[4] = features[2] / max(features[3], 1e-6)
+
+        if len(coords) > 0:
+            area = max(features[2] * features[3], 1e-6)
+            features[5] = len(coords) / area
+            centroid = np.mean(coords, axis=0)
+            features[6] = float(centroid[0])
+            features[7] = float(centroid[1])
+            if len(coords) > 1:
+                dists = np.sqrt(np.sum((coords - centroid)**2, axis=1))
+                features[8] = float(np.std(dists))
 
         return np.array(features)
 
@@ -620,29 +644,23 @@ class GPUAcceleratedAI:
         try:
             features = self.extract_features_gpu(points)
 
-            complexity = features[0]
-            path_length = features[1]
-            aspect_ratio = features[4] if len(features) > 4 else 1.0
+            complexity = float(features[0])
+            path_length = float(features[1])
+            aspect_ratio = float(features[4]) if len(features) > 4 else 1.0
+            density = float(features[5]) if len(features) > 5 else 0.0
 
-            if complexity > 0.7:
-                steps = random.randint(8, 15)
-                scribble = random.uniform(1.0, 3.0)
-            elif complexity > 0.4:
-                steps = random.randint(4, 10)
-                scribble = random.uniform(2.0, 5.0)
-            else:
-                steps = random.randint(2, 7)
-                scribble = random.uniform(3.0, 7.0)
+            steps = int(3 + 12 * complexity)
+            scribble = 1.0 + 6.0 * (1.0 - complexity)
 
-            if path_length > 2000:
-                scribble *= 1.2
-                steps = min(steps + 2, 15)
-            elif path_length < 500:
-                scribble *= 0.8
-                steps = max(steps - 1, 2)
+            length_factor = min(path_length / 1000.0, 3.0)
+            scribble *= 0.8 + 0.4 * min(length_factor, 1.0)
+            steps += int(2 * max(length_factor - 1.0, 0.0))
 
             if aspect_ratio > 2.0 or aspect_ratio < 0.5:
                 scribble *= 1.1
+
+            if density > 0.01:
+                scribble *= max(0.6, 1.0 - density * 0.3)
 
             stroke_weight = self.config.get('stroke_weight_value', 3.0)
             color = (0.0, 0.0, 0.0)
@@ -658,8 +676,8 @@ class GPUAcceleratedAI:
         except Exception as e:
             print(f"Parameter prediction error: {e}")
             return {
-                'steps': random.randint(3, 8),
-                'scribble': random.uniform(2.0, 6.0),
+                'steps': 5,
+                'scribble': 4.0,
                 'stroke_weight': self.config.get('stroke_weight_value', 3.0),
                 'color': (0.0, 0.0, 0.0),
                 'complexity_score': 0.5,
@@ -729,8 +747,8 @@ class GPUHopfieldNetwork:
         for _ in range(max_iterations):
             previous = current.clone()
             activations = torch.mv(self.weights, current)
-            current = torch.sign(activations)
-            if torch.equal(current, previous):
+            current = torch.tanh(activations)
+            if torch.allclose(current, previous, atol=1e-6):
                 break
         return self._denormalize_pattern_gpu(current)
 
@@ -738,10 +756,9 @@ class GPUHopfieldNetwork:
         current = self._normalize_pattern_cpu(partial_pattern)
         for _ in range(max_iterations):
             previous = current.copy()
-            for i in range(len(current)):
-                activation = np.dot(self.weights[i], current)
-                current[i] = 1 if activation > 0 else -1
-            if np.array_equal(current, previous):
+            activations = self.weights @ current
+            current = np.tanh(activations)
+            if np.allclose(current, previous, atol=1e-6):
                 break
         return self._denormalize_pattern_cpu(current)
 
@@ -768,7 +785,7 @@ class GPUHopfieldNetwork:
             pt = torch.cat([pt, torch.zeros(self.pattern_size - len(pt), device=self.device)])
         if torch.std(pt) > 0:
             pt = (pt - torch.mean(pt)) / torch.std(pt)
-        return torch.sign(pt)
+        return pt
 
     def _denormalize_pattern_gpu(self, pattern):
         return ((pattern + 1) / 2).cpu().numpy()
@@ -779,7 +796,7 @@ class GPUHopfieldNetwork:
             p = np.pad(p, (0, self.pattern_size - len(p)))
         if np.std(p) > 0:
             p = (p - np.mean(p)) / np.std(p)
-        return np.sign(p)
+        return p
 
     def _denormalize_pattern_cpu(self, pattern):
         return (pattern + 1) / 2
@@ -842,6 +859,9 @@ class ScribbleGenerator:
         if current_stroke:
             strokes.append(current_stroke)
             stroke_seq_ranges.append((stroke_seq_start, seq_idx))
+
+        if not sequence and self.config.get('smooth_strokes', True):
+            strokes = [self._smooth_stroke(s) for s in strokes]
 
         encoding_info = None
         if sequence:
@@ -917,6 +937,31 @@ class ScribbleGenerator:
 
         return waypoints, seq_idx
 
+    def _smooth_stroke(self, waypoints, density=3):
+        if len(waypoints) < 4 or not SCIPY_AVAILABLE:
+            return waypoints
+
+        xs = np.array([p[0] for p in waypoints])
+        ys = np.array([p[1] for p in waypoints])
+
+        diffs = np.sqrt(np.diff(xs)**2 + np.diff(ys)**2)
+        t = np.concatenate([[0], np.cumsum(diffs)])
+        total = t[-1]
+        if total < 1e-10:
+            return waypoints
+
+        t /= total
+
+        cs_x = CubicSpline(t, xs, bc_type='clamped')
+        cs_y = CubicSpline(t, ys, bc_type='clamped')
+
+        n_out = max(len(waypoints) * density, 8)
+        t_new = np.linspace(0, 1, n_out)
+        smoothed = list(zip(cs_x(t_new).tolist(), cs_y(t_new).tolist()))
+        smoothed[0] = waypoints[0]
+        smoothed[-1] = waypoints[-1]
+        return smoothed
+
     def _count_capacity(self, points, steps):
         count = 0
         for i in range(len(points) - 1):
@@ -941,8 +986,20 @@ class ScribbleRenderer:
         if not strokes:
             return None
 
-        fig_width = self.config.get('page_width', 800) / 100
-        fig_height = self.config.get('page_height', 600) / 100
+        all_x = [p[0] for s in strokes for p in s]
+        all_y = [p[1] for s in strokes for p in s]
+        if not all_x:
+            return None
+
+        draw_w = max(all_x) - min(all_x)
+        draw_h = max(all_y) - min(all_y)
+        max_inches = 10.0
+        if draw_w >= draw_h:
+            fig_width = max_inches
+            fig_height = max(max_inches * draw_h / max(draw_w, 1e-6), 2.0)
+        else:
+            fig_height = max_inches
+            fig_width = max(max_inches * draw_w / max(draw_h, 1e-6), 2.0)
 
         fig, ax = plt.subplots(figsize=(fig_width, fig_height))
         ax.set_aspect('equal')
@@ -958,9 +1015,9 @@ class ScribbleRenderer:
             ys = [p[1] for p in stroke]
             ax.plot(xs, ys, color=color, linewidth=lw, alpha=0.8)
 
-        ax.set_xlim(auto=True)
-        ax.set_ylim(auto=True)
-        ax.invert_yaxis()
+        pad = max(draw_w, draw_h) * 0.03
+        ax.set_xlim(min(all_x) - pad, max(all_x) + pad)
+        ax.set_ylim(max(all_y) + pad, min(all_y) - pad)
         plt.tight_layout()
         return fig
 
@@ -1220,13 +1277,23 @@ class CompleteProcessingSystem:
 
                 if self.config.get('use_hopfield_memory'):
                     features = self.gpu_ai.extract_features_gpu(points)
-                    evolved_features = self.hopfield_network.recall_pattern(features)
+                    recalled = self.hopfield_network.recall_pattern(features)
 
-                    blend_factor = 0.7
-                    params['scribble'] = (blend_factor * params['scribble'] +
-                                          (1 - blend_factor) * abs(evolved_features[0]) * 8)
-                    params['scribble'] = max(0.1, min(10.0, params['scribble']))
-                    print(f"  Hopfield Enhanced: scribble={params['scribble']:.1f}")
+                    blend = 0.7
+                    r_complexity = max(0.0, min(1.0, float(recalled[0])))
+                    mem_steps = 3 + 12 * r_complexity
+                    mem_scribble = 1.0 + 6.0 * (1.0 - r_complexity)
+                    params['steps'] = max(2, min(20, int(
+                        blend * params['steps'] + (1 - blend) * mem_steps)))
+                    params['scribble'] = max(0.1, min(10.0,
+                        blend * params['scribble'] + (1 - blend) * mem_scribble))
+                    r_spread = max(0.0, min(1.0, float(recalled[8]))) if len(recalled) > 8 else 0.5
+                    mem_weight = 1.5 + 4.0 * r_spread
+                    params['stroke_weight'] = max(0.5, min(8.0,
+                        blend * params['stroke_weight'] + (1 - blend) * mem_weight))
+                    print(f"  Hopfield Enhanced: steps={params['steps']},"
+                          f" scribble={params['scribble']:.1f},"
+                          f" weight={params['stroke_weight']:.1f}")
             else:
                 params = {
                     'steps': self.config.get('steps_fixed', 5),
@@ -1713,6 +1780,8 @@ def main():
                         help='Create sample PLT files')
     parser.add_argument('--no-groups', action='store_true',
                         help='Disable GROUP directory organization')
+    parser.add_argument('--no-smooth', action='store_true',
+                        help='Disable cubic spline stroke smoothing')
     parser.add_argument('--gpu-status', action='store_true',
                         help='Show GPU status')
 
@@ -1745,6 +1814,8 @@ def main():
         CONFIG.config['stroke_weight_override'] = args.stroke_weight
     if args.scribble is not None:
         CONFIG.config['scribble_override'] = args.scribble
+    if args.no_smooth:
+        CONFIG.config['smooth_strokes'] = False
 
     CONFIG.display_status()
 

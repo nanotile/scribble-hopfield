@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-GPU-Integrated AI-Enhanced Scribble Plotter v4.0 - Converts PLT, DXF, DWG, and DWX vector graphics into artistic "scribble" renderings using GPU-accelerated AI and Hopfield neural networks, with optional biological sequence encoding that embeds DNA or protein data as vector geometry. Inspired by Kent Benson's 1983-1986 Hopfield Network research.
+GPU-Integrated AI-Enhanced Scribble Plotter v4.1 - Converts PLT, DXF, DWG, and DWX vector graphics into artistic "scribble" renderings using GPU-accelerated AI and Hopfield neural networks, with optional biological sequence encoding that embeds DNA or protein data as vector geometry. Inspired by Kent Benson's 1983-1986 Hopfield Network research.
 
 ## Running Locally
 
@@ -36,7 +36,7 @@ pip install -r requirements.txt
 ./venv/bin/python scribble_plotter_local.py --input ./files --examples 5 --output ./results
 
 # Disable features
-./venv/bin/python scribble_plotter_local.py --no-gpu --no-ai --no-hopfield --no-svg
+./venv/bin/python scribble_plotter_local.py --no-gpu --no-ai --no-hopfield --no-svg --no-smooth
 
 # End-to-end demo (creates samples, processes, shows output)
 ./venv/bin/python scribble_plotter_local.py --full-demo
@@ -92,10 +92,10 @@ The system consists of these main classes organized in a processing pipeline:
 | `CompleteConfiguration` | GPU detection, JSON config persistence (machine-specific keys never saved) |
 | `PLTProcessor` | Unified HPGL parser — handles PU/PD/PA with integer, decimal, negative coords and multiple pairs per command |
 | `CADFileProcessor` | Reads DXF/DWG/DWX via ezdxf, extracts LINE/POLYLINE/CIRCLE/ARC/ELLIPSE/SPLINE entities, auto-normalizes coordinates |
-| `GPUAcceleratedAI` | Feature extraction (15-feature vectors), parameter prediction with GPU/CPU fallback |
-| `GPUHopfieldNetwork` | Stores artistic patterns (200 capacity), Hebbian learning, spurious memory detection |
-| `ScribbleGenerator` | Generates scribbled geometry once from points + params (random or sequence-driven wobble) |
-| `ScribbleRenderer` | Draws pre-generated strokes via matplotlib for PNG/PDF export |
+| `GPUAcceleratedAI` | Feature extraction (15-feature vectors), deterministic parameter prediction via continuous complexity mapping |
+| `GPUHopfieldNetwork` | Stores artistic patterns (200 capacity), Hebbian learning with continuous tanh activation, multi-parameter recall |
+| `ScribbleGenerator` | Generates scribbled geometry once from points + params (random or sequence-driven wobble), cubic spline smoothing |
+| `ScribbleRenderer` | Draws pre-generated strokes via matplotlib, canvas sized from input bounding box |
 | `SVGExporter` | Writes SVG directly as `<path>` elements with optional sequence metadata |
 | `DirectoryManager` | Per-file working directories, GROUP aggregate directories (copy-based, non-destructive) |
 | `CompleteProcessingSystem` | Batch orchestration, multi-format output (PNG/PDF/DXF/SVG) |
@@ -118,7 +118,10 @@ Input Files → PLTProcessor (PLT) or CADFileProcessor (DXF/DWG/DWX)
 - **Single Geometry:** Scribbled paths are generated once and shared across all exporters (PNG, PDF, DXF, SVG)
 - **Pattern Memory:** Hopfield network learns and stores artistic styles across processing runs
 - **Spurious Memories:** Implementation of neural network "intuitive leaps" for creative variation
-- **Adaptive Parameters:** AI analyzes drawing complexity to select rendering parameters (steps, variation, stroke weight)
+- **Adaptive Parameters:** AI maps drawing complexity/density/path-length to parameters via continuous functions (deterministic, no random)
+- **Continuous Hopfield:** tanh activation preserves nuance; recalled patterns influence steps, scribble, and stroke weight
+- **Spline Smoothing:** Cubic spline interpolation smooths scribble strokes (auto-disabled in sequence mode, `--no-smooth` to disable)
+- **Adaptive Canvas:** Renderer derives figure dimensions from stroke bounding box instead of fixed size
 - **Sequence Encoding:** Perpendicular displacement quantization embeds decodable biological data
 
 ## Running the Web UI (Gradio)
