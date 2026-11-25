@@ -161,6 +161,10 @@ class CompleteConfiguration:
         'directories', 'device', 'gpu_enabled',
         'use_gpu_acceleration', 'use_gpu_ai', 'use_gpu_hopfield',
     })
+    SESSION_ONLY_KEYS = frozenset({
+        'steps_override', 'color_override', 'stroke_weight_override',
+        'scribble_override', 'seed',
+    })
 
     def __init__(self, system_info):
         self.system_info = system_info
@@ -214,7 +218,7 @@ class CompleteConfiguration:
             if os.path.exists(self.config_file):
                 with open(self.config_file, 'r') as f:
                     loaded = json.load(f)
-                for key in self.MACHINE_SPECIFIC_KEYS:
+                for key in self.MACHINE_SPECIFIC_KEYS | self.SESSION_ONLY_KEYS:
                     loaded.pop(key, None)
                 config = {**self.defaults, **loaded}
                 print("Configuration loaded")
@@ -230,7 +234,7 @@ class CompleteConfiguration:
     def save_config(self, config=None):
         try:
             config_to_save = dict(config or self.config)
-            for key in self.MACHINE_SPECIFIC_KEYS:
+            for key in self.MACHINE_SPECIFIC_KEYS | self.SESSION_ONLY_KEYS:
                 config_to_save.pop(key, None)
             with open(self.config_file, 'w') as f:
                 json.dump(config_to_save, f, indent=2)
@@ -640,8 +644,8 @@ class GPUAcceleratedAI:
             if aspect_ratio > 2.0 or aspect_ratio < 0.5:
                 scribble *= 1.1
 
-            stroke_weight = random.uniform(1.0, 4.0)
-            color = (random.random(), random.random(), random.random())
+            stroke_weight = self.config.get('stroke_weight_value', 3.0)
+            color = (0.0, 0.0, 0.0)
 
             return {
                 'steps': max(2, min(20, steps)),
@@ -656,8 +660,8 @@ class GPUAcceleratedAI:
             return {
                 'steps': random.randint(3, 8),
                 'scribble': random.uniform(2.0, 6.0),
-                'stroke_weight': random.uniform(1.0, 4.0),
-                'color': (random.random(), random.random(), random.random()),
+                'stroke_weight': self.config.get('stroke_weight_value', 3.0),
+                'color': (0.0, 0.0, 0.0),
                 'complexity_score': 0.5,
                 'generation_method': 'fallback'
             }
@@ -897,18 +901,19 @@ class ScribbleGenerator:
 
             waypoints.append((x2, y2))
         else:
-            x_step = dx / steps
-            y_step = dy / steps
-            cx, cy = x1, y1
+            perp_x = -dy / seg_len
+            perp_y = dx / seg_len
 
-            for step in range(steps):
-                if step < steps - 1:
-                    nx = cx + x_step + random.uniform(-amplitude, amplitude)
-                    ny = cy + y_step + random.uniform(-amplitude, amplitude)
-                else:
-                    nx, ny = x2, y2
-                waypoints.append((nx, ny))
-                cx, cy = nx, ny
+            for step_num in range(1, steps):
+                t = step_num / steps
+                ideal_x = x1 + t * dx
+                ideal_y = y1 + t * dy
+                offset = random.uniform(-amplitude, amplitude)
+                point_x = ideal_x + offset * perp_x
+                point_y = ideal_y + offset * perp_y
+                waypoints.append((point_x, point_y))
+
+            waypoints.append((x2, y2))
 
         return waypoints, seq_idx
 
@@ -1224,16 +1229,25 @@ class CompleteProcessingSystem:
                     print(f"  Hopfield Enhanced: scribble={params['scribble']:.1f}")
             else:
                 params = {
-                    'steps': random.randint(3, 10),
-                    'scribble': random.uniform(2.0, 6.0),
-                    'stroke_weight': random.uniform(1.0, 4.0),
-                    'color': (random.random(), random.random(), random.random()),
+                    'steps': self.config.get('steps_fixed', 5),
+                    'scribble': self.config.get('scribble_fixed', 3.0),
+                    'stroke_weight': self.config.get('stroke_weight_value', 3.0),
+                    'color': (0.0, 0.0, 0.0),
                     'generation_method': 'traditional'
                 }
 
-            # Override steps if specified via CLI
+            # CLI overrides apply on top of any parameter source
             if self.config.get('steps_override'):
                 params['steps'] = self.config.get('steps_override')
+            color_ovr = self.config.get('color_override')
+            if color_ovr is not None:
+                params['color'] = color_ovr
+            scribble_ovr = self.config.get('scribble_override')
+            if scribble_ovr is not None:
+                params['scribble'] = scribble_ovr
+            sw_ovr = self.config.get('stroke_weight_override')
+            if sw_ovr is not None:
+                params['stroke_weight'] = sw_ovr
 
             # Generate scribbled geometry ONCE
             strokes, encoding_info = self.generator.generate(
@@ -1638,6 +1652,24 @@ def run_complete_demo(config, processing_system):
     print(f"Output: {output_dir}")
 
 
+def _parse_color(color_str):
+    """Parse color string to (r, g, b) tuple with values 0.0-1.0."""
+    named = {
+        'black': (0.0, 0.0, 0.0), 'white': (1.0, 1.0, 1.0),
+        'red': (1.0, 0.0, 0.0), 'green': (0.0, 0.5, 0.0),
+        'blue': (0.0, 0.0, 1.0), 'gray': (0.5, 0.5, 0.5),
+        'grey': (0.5, 0.5, 0.5), 'navy': (0.0, 0.0, 0.5),
+        'brown': (0.4, 0.2, 0.0), 'sepia': (0.44, 0.26, 0.08),
+    }
+    s = color_str.strip().lower()
+    if s in named:
+        return named[s]
+    s = s.lstrip('#')
+    if len(s) == 6:
+        return (int(s[0:2], 16) / 255, int(s[2:4], 16) / 255, int(s[4:6], 16) / 255)
+    raise ValueError(f"Unknown color: {color_str!r}  (use a name or #rrggbb hex)")
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
@@ -1655,6 +1687,14 @@ def main():
                         help='Override steps per segment (more steps = more encoding capacity)')
     parser.add_argument('--sequence', type=str, default=None,
                         help='Path to FASTA file for sequence-driven wobble')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed for reproducible output')
+    parser.add_argument('--color', type=str, default=None,
+                        help='Stroke color: "black", "red", or hex "#2a4b7c"')
+    parser.add_argument('--stroke-weight', type=float, default=None,
+                        help='Stroke weight (default: 3.0)')
+    parser.add_argument('--scribble', type=float, default=None,
+                        help='Scribble wobble amplitude (default: 3.0)')
     parser.add_argument('--no-gpu', action='store_true',
                         help='Disable GPU acceleration')
     parser.add_argument('--no-ai', action='store_true',
@@ -1696,6 +1736,15 @@ def main():
         CONFIG.config['generate_svg'] = False
     if args.steps:
         CONFIG.config['steps_override'] = args.steps
+    if args.seed is not None:
+        random.seed(args.seed)
+        CONFIG.config['seed'] = args.seed
+    if args.color:
+        CONFIG.config['color_override'] = _parse_color(args.color)
+    if args.stroke_weight is not None:
+        CONFIG.config['stroke_weight_override'] = args.stroke_weight
+    if args.scribble is not None:
+        CONFIG.config['scribble_override'] = args.scribble
 
     CONFIG.display_status()
 
